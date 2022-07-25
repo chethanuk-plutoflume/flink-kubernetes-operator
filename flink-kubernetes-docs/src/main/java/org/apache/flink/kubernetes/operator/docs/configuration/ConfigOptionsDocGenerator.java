@@ -72,7 +72,9 @@ public class ConfigOptionsDocGenerator {
     static final OptionsClassLocation[] LOCATIONS =
             new OptionsClassLocation[] {
                 new OptionsClassLocation(
-                        "flink-kubernetes-operator", "org.apache.flink.kubernetes.operator.config")
+                        "flink-kubernetes-operator", "org.apache.flink.kubernetes.operator.config"),
+                new OptionsClassLocation(
+                        "flink-kubernetes-operator", "org.apache.flink.kubernetes.operator.metrics")
             };
     static final String DEFAULT_PATH_PREFIX = "src/main/java";
 
@@ -100,8 +102,9 @@ public class ConfigOptionsDocGenerator {
      * are annotated with {@link Documentation.Section}.
      *
      * @param args [0] output directory for the generated files [1] project root directory
+     * @throws Exception Error during doc generation.
      */
-    public static void main(String[] args) throws IOException, ClassNotFoundException {
+    public static void main(String[] args) throws Exception {
         String outputDirectory = args[0];
         String rootDir = args[1];
         LOG.info(

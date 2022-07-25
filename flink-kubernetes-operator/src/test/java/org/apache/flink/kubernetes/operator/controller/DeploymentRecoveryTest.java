@@ -51,16 +51,16 @@ public class DeploymentRecoveryTest {
 
     private TestingFlinkService flinkService;
     private Context context;
-    private FlinkDeploymentController testController;
+    private TestingFlinkDeploymentController testController;
 
     private KubernetesClient kubernetesClient;
 
     @BeforeEach
     public void setup() {
-        flinkService = new TestingFlinkService();
+        flinkService = new TestingFlinkService(kubernetesClient);
         context = flinkService.getContext();
         testController =
-                TestUtils.createTestController(configManager, kubernetesClient, flinkService);
+                new TestingFlinkDeploymentController(configManager, kubernetesClient, flinkService);
         kubernetesClient.resource(TestUtils.buildApplicationCluster()).createOrReplace();
     }
 

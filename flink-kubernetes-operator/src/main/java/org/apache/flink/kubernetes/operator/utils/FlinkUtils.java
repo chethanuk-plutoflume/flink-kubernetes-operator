@@ -17,18 +17,18 @@
 
 package org.apache.flink.kubernetes.operator.utils;
 
-import org.apache.flink.api.common.JobStatus;
+import org.apache.flink.api.common.JobID;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.CoreOptions;
 import org.apache.flink.configuration.HighAvailabilityOptions;
+import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.kubernetes.configuration.KubernetesConfigOptions;
 import org.apache.flink.kubernetes.highavailability.KubernetesHaServicesFactory;
-import org.apache.flink.kubernetes.kubeclient.decorators.ExternalServiceDecorator;
 import org.apache.flink.kubernetes.operator.crd.spec.FlinkDeploymentSpec;
 import org.apache.flink.kubernetes.operator.crd.spec.FlinkVersion;
-import org.apache.flink.kubernetes.operator.crd.status.FlinkDeploymentStatus;
-import org.apache.flink.kubernetes.operator.crd.status.JobManagerDeploymentStatus;
 import org.apache.flink.kubernetes.utils.Constants;
 import org.apache.flink.kubernetes.utils.KubernetesUtils;
+import org.apache.flink.util.Preconditions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -38,23 +38,23 @@ import io.fabric8.kubernetes.api.model.ConfigMap;
 import io.fabric8.kubernetes.api.model.ConfigMapList;
 import io.fabric8.kubernetes.api.model.ObjectMeta;
 import io.fabric8.kubernetes.api.model.Pod;
-import io.fabric8.kubernetes.api.model.PodList;
-import io.fabric8.kubernetes.api.model.Service;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.function.Predicate;
-
-import static org.apache.flink.kubernetes.utils.Constants.LABEL_CONFIGMAP_TYPE_HIGH_AVAILABILITY;
 
 /** Flink Utility methods used by the operator. */
 public class FlinkUtils {
 
     private static final Logger LOG = LoggerFactory.getLogger(FlinkUtils.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    public static final String CR_GENERATION_LABEL = "flinkdeployment.flink.apache.org/generation";
 
     public static Pod mergePodTemplates(Pod toPod, Pod fromPod) {
         if (fromPod == null) {
@@ -97,120 +97,6 @@ public class FlinkUtils {
                 }
             }
         }
-    }
-
-    /**
-     * Delete Flink kubernetes cluster by deleting the kubernetes resources directly. Optionally
-     * allows deleting the native kubernetes HA resources as well.
-     *
-     * @param status Deployment status object
-     * @param meta ObjectMeta of the deployment
-     * @param kubernetesClient Kubernetes client
-     * @param deleteHaConfigmaps Flag to indicate whether k8s HA metadata should be removed as well
-     * @param shutdownTimeout maximum time allowed for cluster shutdown
-     */
-    public static void deleteCluster(
-            FlinkDeploymentStatus status,
-            ObjectMeta meta,
-            KubernetesClient kubernetesClient,
-            boolean deleteHaConfigmaps,
-            long shutdownTimeout) {
-
-        String namespace = meta.getNamespace();
-        String clusterId = meta.getName();
-
-        LOG.info(
-                "Deleting JobManager deployment {}.",
-                deleteHaConfigmaps ? "and HA metadata" : "while preserving HA metadata");
-        kubernetesClient
-                .apps()
-                .deployments()
-                .inNamespace(namespace)
-                .withName(KubernetesUtils.getDeploymentName(clusterId))
-                .cascading(true)
-                .delete();
-
-        if (deleteHaConfigmaps) {
-            // We need to wait for cluster shutdown otherwise HA configmaps might be recreated
-            waitForClusterShutdown(kubernetesClient, namespace, clusterId, shutdownTimeout);
-            kubernetesClient
-                    .configMaps()
-                    .inNamespace(namespace)
-                    .withLabels(
-                            KubernetesUtils.getConfigMapLabels(
-                                    clusterId, LABEL_CONFIGMAP_TYPE_HIGH_AVAILABILITY))
-                    .delete();
-        }
-        status.setJobManagerDeploymentStatus(JobManagerDeploymentStatus.MISSING);
-        status.getJobStatus().setState(JobStatus.FINISHED.name());
-    }
-
-    /** Wait until the FLink cluster has completely shut down. */
-    public static void waitForClusterShutdown(
-            KubernetesClient kubernetesClient,
-            String namespace,
-            String clusterId,
-            long shutdownTimeout) {
-
-        boolean jobManagerRunning = true;
-        boolean serviceRunning = true;
-
-        for (int i = 0; i < shutdownTimeout; i++) {
-            if (jobManagerRunning) {
-                PodList jmPodList = getJmPodList(kubernetesClient, namespace, clusterId);
-
-                if (jmPodList == null || jmPodList.getItems().isEmpty()) {
-                    jobManagerRunning = false;
-                }
-            }
-
-            if (serviceRunning) {
-                Service service =
-                        kubernetesClient
-                                .services()
-                                .inNamespace(namespace)
-                                .withName(
-                                        ExternalServiceDecorator.getExternalServiceName(clusterId))
-                                .fromServer()
-                                .get();
-                if (service == null) {
-                    serviceRunning = false;
-                }
-            }
-
-            if (!jobManagerRunning && !serviceRunning) {
-                break;
-            }
-            // log a message waiting to shutdown Flink cluster every 5 seconds.
-            if ((i + 1) % 5 == 0) {
-                LOG.info("Waiting for cluster shutdown... ({}s)", i + 1);
-            }
-            try {
-                Thread.sleep(1000);
-            } catch (InterruptedException e) {
-                throw new RuntimeException(e);
-            }
-        }
-        LOG.info("Cluster shutdown completed.");
-    }
-
-    /** Wait until the FLink cluster has completely shut down. */
-    public static void waitForClusterShutdown(
-            KubernetesClient kubernetesClient, Configuration conf, long shutdownTimeout) {
-        FlinkUtils.waitForClusterShutdown(
-                kubernetesClient,
-                conf.getString(KubernetesConfigOptions.NAMESPACE),
-                conf.getString(KubernetesConfigOptions.CLUSTER_ID),
-                shutdownTimeout);
-    }
-
-    public static PodList getJmPodList(
-            KubernetesClient kubernetesClient, String namespace, String clusterId) {
-        return kubernetesClient
-                .pods()
-                .inNamespace(namespace)
-                .withLabels(KubernetesUtils.getJobManagerSelectors(clusterId))
-                .list();
     }
 
     public static void deleteJobGraphInKubernetesHA(
@@ -277,5 +163,49 @@ public class FlinkUtils {
 
     public static boolean clusterShutdownDisabled(FlinkDeploymentSpec spec) {
         return spec.getFlinkVersion().isNewerVersionThan(FlinkVersion.v1_14);
+    }
+
+    public static int getNumTaskManagers(Configuration conf) {
+        int parallelism = conf.get(CoreOptions.DEFAULT_PARALLELISM);
+        return getNumTaskManagers(conf, parallelism);
+    }
+
+    public static int getNumTaskManagers(Configuration conf, int parallelism) {
+        int taskSlots = conf.get(TaskManagerOptions.NUM_TASK_SLOTS);
+        return (parallelism + taskSlots - 1) / taskSlots;
+    }
+
+    public static void setGenerationAnnotation(Configuration conf, Long generation) {
+        if (generation == null) {
+            return;
+        }
+        var labels =
+                new HashMap<>(
+                        conf.getOptional(KubernetesConfigOptions.JOB_MANAGER_ANNOTATIONS)
+                                .orElse(Collections.emptyMap()));
+        labels.put(CR_GENERATION_LABEL, generation.toString());
+        conf.set(KubernetesConfigOptions.JOB_MANAGER_ANNOTATIONS, labels);
+    }
+
+    /**
+     * The jobID's lower part is the resource uid, the higher part is the resource generation.
+     *
+     * @param meta the meta of the resource.
+     * @return the generated jobID.
+     */
+    public static JobID generateSessionJobFixedJobID(ObjectMeta meta) {
+        return generateSessionJobFixedJobID(meta.getUid(), meta.getGeneration());
+    }
+
+    /**
+     * The jobID's lower part is the resource uid, the higher part is the resource generation.
+     *
+     * @param uid the uid of the resource.
+     * @param generation the generation of the resource.
+     * @return the generated jobID.
+     */
+    public static JobID generateSessionJobFixedJobID(String uid, Long generation) {
+        return new JobID(
+                Preconditions.checkNotNull(uid).hashCode(), Preconditions.checkNotNull(generation));
     }
 }

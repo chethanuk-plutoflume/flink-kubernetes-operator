@@ -22,10 +22,11 @@ import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.GlobalConfiguration;
 import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
-import org.apache.flink.kubernetes.operator.crd.FlinkSessionJob;
 import org.apache.flink.kubernetes.operator.crd.spec.FlinkDeploymentSpec;
+import org.apache.flink.kubernetes.operator.crd.spec.FlinkSessionJobSpec;
 import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
 import org.apache.flink.kubernetes.operator.utils.EnvUtils;
+import org.apache.flink.kubernetes.operator.utils.FlinkUtils;
 
 import org.apache.flink.shaded.guava30.com.google.common.cache.Cache;
 import org.apache.flink.shaded.guava30.com.google.common.cache.CacheBuilder;
@@ -38,16 +39,18 @@ import io.fabric8.kubernetes.api.model.ObjectMeta;
 import lombok.Builder;
 import lombok.SneakyThrows;
 import lombok.Value;
+import org.apache.commons.lang3.ObjectUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
-import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 import static org.apache.flink.kubernetes.operator.config.KubernetesOperatorConfigOptions.OPERATOR_DYNAMIC_CONFIG_CHECK_INTERVAL;
 import static org.apache.flink.kubernetes.operator.config.KubernetesOperatorConfigOptions.OPERATOR_DYNAMIC_CONFIG_ENABLED;
@@ -61,15 +64,21 @@ public class FlinkConfigManager {
     private volatile Configuration defaultConfig;
     private volatile FlinkOperatorConfiguration operatorConfiguration;
     private final AtomicLong defaultConfigVersion = new AtomicLong(0);
-
     private final LoadingCache<Key, Configuration> cache;
-    private final Set<String> namespaces = EnvUtils.getWatchedNamespaces();
+    private final Consumer<Set<String>> namespaceListener;
 
-    public FlinkConfigManager() {
-        this(GlobalConfiguration.loadConfiguration());
+    @VisibleForTesting
+    public FlinkConfigManager(Configuration defaultConfig) {
+        this(defaultConfig, ns -> {});
     }
 
-    public FlinkConfigManager(Configuration defaultConfig) {
+    public FlinkConfigManager(Consumer<Set<String>> namespaceListener) {
+        this(loadGlobalConfiguration(), namespaceListener);
+    }
+
+    public FlinkConfigManager(
+            Configuration defaultConfig, Consumer<Set<String>> namespaceListener) {
+        this.namespaceListener = namespaceListener;
         Duration cacheTimeout =
                 defaultConfig.get(KubernetesOperatorConfigOptions.OPERATOR_CONFIG_CACHE_TIMEOUT);
         this.cache =
@@ -104,19 +113,28 @@ public class FlinkConfigManager {
     }
 
     public Configuration getDefaultConfig() {
-        return defaultConfig;
+        return defaultConfig.clone();
     }
 
     @VisibleForTesting
     public void updateDefaultConfig(Configuration newConf) {
-        if (newConf.equals(defaultConfig)) {
+        if (ObjectUtils.allNotNull(this.defaultConfig, newConf)
+                && this.defaultConfig.toMap().equals(newConf.toMap())) {
             LOG.info("Default configuration did not change, nothing to do...");
             return;
+        } else {
+            LOG.info("Setting default configuration to {}", newConf);
         }
 
-        LOG.info("Updating default configuration to {}", newConf);
-        this.operatorConfiguration =
-                FlinkOperatorConfiguration.fromConfiguration(newConf, namespaces);
+        var oldNs =
+                Optional.ofNullable(this.operatorConfiguration)
+                        .map(FlinkOperatorConfiguration::getWatchedNamespaces)
+                        .orElse(Set.of());
+        this.operatorConfiguration = FlinkOperatorConfiguration.fromConfiguration(newConf);
+        var newNs = this.operatorConfiguration.getWatchedNamespaces();
+        if (this.operatorConfiguration.isDynamicNamespacesEnabled() && !oldNs.equals(newNs)) {
+            this.namespaceListener.accept(operatorConfiguration.getWatchedNamespaces());
+        }
         this.defaultConfig = newConf.clone();
         // We do not invalidate the cache to avoid deleting currently used temp files,
         // simply bump the version
@@ -128,7 +146,9 @@ public class FlinkConfigManager {
     }
 
     public Configuration getDeployConfig(ObjectMeta objectMeta, FlinkDeploymentSpec spec) {
-        return getConfig(objectMeta, spec);
+        var conf = getConfig(objectMeta, spec);
+        FlinkUtils.setGenerationAnnotation(conf, objectMeta.getGeneration());
+        return conf;
     }
 
     public Configuration getObserveConfig(FlinkDeployment deployment) {
@@ -141,12 +161,11 @@ public class FlinkConfigManager {
     }
 
     public Configuration getSessionJobConfig(
-            FlinkDeployment deployment, FlinkSessionJob flinkSessionJob) {
+            FlinkDeployment deployment, FlinkSessionJobSpec sessionJobSpec) {
         Configuration sessionJobConfig = getObserveConfig(deployment);
 
         // merge session job specific config
-        Map<String, String> sessionJobFlinkConfiguration =
-                flinkSessionJob.getSpec().getFlinkConfiguration();
+        var sessionJobFlinkConfiguration = sessionJobSpec.getFlinkConfiguration();
         if (sessionJobFlinkConfiguration != null) {
             sessionJobFlinkConfiguration.forEach(sessionJobConfig::setString);
         }
@@ -193,11 +212,27 @@ public class FlinkConfigManager {
         return cache;
     }
 
+    private static Configuration loadGlobalConfiguration() {
+        return loadGlobalConfiguration(EnvUtils.get(EnvUtils.ENV_CONF_OVERRIDE_DIR));
+    }
+
+    @VisibleForTesting
+    protected static Configuration loadGlobalConfiguration(Optional<String> confOverrideDir) {
+        if (confOverrideDir.isPresent()) {
+            Configuration configOverrides =
+                    GlobalConfiguration.loadConfiguration(confOverrideDir.get());
+            LOG.debug("Loading default configuration with overrides from " + confOverrideDir.get());
+            return GlobalConfiguration.loadConfiguration(configOverrides);
+        }
+        LOG.debug("Loading default configuration");
+        return GlobalConfiguration.loadConfiguration();
+    }
+
     private class ConfigUpdater implements Runnable {
         public void run() {
             try {
                 LOG.debug("Checking for config update changes...");
-                updateDefaultConfig(GlobalConfiguration.loadConfiguration());
+                updateDefaultConfig(loadGlobalConfiguration());
             } catch (Exception e) {
                 LOG.error("Error while updating operator configuration", e);
             }

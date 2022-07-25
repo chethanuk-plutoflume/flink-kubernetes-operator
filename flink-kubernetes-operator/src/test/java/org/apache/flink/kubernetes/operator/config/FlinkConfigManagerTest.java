@@ -21,21 +21,29 @@ import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.DeploymentOptionsInternal;
+import org.apache.flink.configuration.GlobalConfiguration;
 import org.apache.flink.kubernetes.configuration.KubernetesConfigOptions;
 import org.apache.flink.kubernetes.operator.TestUtils;
 import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
-import org.apache.flink.kubernetes.operator.crd.spec.JobState;
 import org.apache.flink.kubernetes.operator.crd.status.ReconciliationState;
 import org.apache.flink.kubernetes.operator.crd.status.ReconciliationStatus;
 import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
+import org.apache.flink.kubernetes.operator.utils.FlinkUtils;
 import org.apache.flink.kubernetes.utils.Constants;
 
 import io.fabric8.kubernetes.api.model.Pod;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -61,7 +69,7 @@ public class FlinkConfigManagerTest {
                 deployment.getStatus().getReconciliationStatus();
 
         deployment.getSpec().getFlinkConfiguration().put(testConf.key(), "reconciled");
-        reconciliationStatus.serializeAndSetLastReconciledSpec(deployment.getSpec());
+        reconciliationStatus.serializeAndSetLastReconciledSpec(deployment.getSpec(), deployment);
         reconciliationStatus.markReconciledSpecAsStable();
 
         deployment.getSpec().getFlinkConfiguration().put(testConf.key(), "latest");
@@ -73,14 +81,21 @@ public class FlinkConfigManagerTest {
         assertEquals("reconciled", configManager.getObserveConfig(deployment).get(testConf));
 
         deployment.getSpec().getFlinkConfiguration().put(testConf.key(), "stable");
-        reconciliationStatus.serializeAndSetLastReconciledSpec(deployment.getSpec());
+        reconciliationStatus.serializeAndSetLastReconciledSpec(deployment.getSpec(), deployment);
         reconciliationStatus.markReconciledSpecAsStable();
 
         deployment.getSpec().getFlinkConfiguration().put(testConf.key(), "rolled-back");
-        reconciliationStatus.serializeAndSetLastReconciledSpec(deployment.getSpec());
+        reconciliationStatus.serializeAndSetLastReconciledSpec(deployment.getSpec(), deployment);
         reconciliationStatus.setState(ReconciliationState.ROLLED_BACK);
 
         assertEquals("stable", configManager.getObserveConfig(deployment).get(testConf));
+
+        deployment.getMetadata().setGeneration(5L);
+        var deployConfig =
+                configManager.getDeployConfig(deployment.getMetadata(), deployment.getSpec());
+        assertEquals(
+                Map.of(FlinkUtils.CR_GENERATION_LABEL, "5"),
+                deployConfig.get(KubernetesConfigOptions.JOB_MANAGER_ANNOTATIONS));
     }
 
     @Test
@@ -90,23 +105,20 @@ public class FlinkConfigManagerTest {
         assertFalse(
                 configManager
                         .getDefaultConfig()
-                        .contains(
-                                KubernetesOperatorConfigOptions
-                                        .OPERATOR_RECONCILER_RESCHEDULE_INTERVAL));
+                        .contains(KubernetesOperatorConfigOptions.OPERATOR_RECONCILE_INTERVAL));
 
         config.set(
-                KubernetesOperatorConfigOptions.OPERATOR_RECONCILER_RESCHEDULE_INTERVAL,
+                KubernetesOperatorConfigOptions.OPERATOR_RECONCILE_INTERVAL,
                 Duration.ofSeconds(15));
 
         FlinkDeployment deployment = TestUtils.buildApplicationCluster();
         deployment.getSpec().setLogConfiguration(Map.of(Constants.CONFIG_FILE_LOG4J_NAME, "test"));
         deployment.getSpec().setPodTemplate(new Pod());
 
-        ReconciliationUtils.updateForSpecReconciliationSuccess(deployment, JobState.RUNNING);
+        ReconciliationUtils.updateStatusForDeployedSpec(deployment, config);
         Configuration deployConfig = configManager.getObserveConfig(deployment);
         assertFalse(
-                deployConfig.contains(
-                        KubernetesOperatorConfigOptions.OPERATOR_RECONCILER_RESCHEDULE_INTERVAL));
+                deployConfig.contains(KubernetesOperatorConfigOptions.OPERATOR_RECONCILE_INTERVAL));
         assertTrue(new File(deployConfig.get(DeploymentOptionsInternal.CONF_DIR)).exists());
         assertTrue(
                 new File(deployConfig.get(KubernetesConfigOptions.KUBERNETES_POD_TEMPLATE))
@@ -148,9 +160,7 @@ public class FlinkConfigManagerTest {
                 Duration.ofSeconds(15),
                 configManager
                         .getDefaultConfig()
-                        .get(
-                                KubernetesOperatorConfigOptions
-                                        .OPERATOR_RECONCILER_RESCHEDULE_INTERVAL));
+                        .get(KubernetesOperatorConfigOptions.OPERATOR_RECONCILE_INTERVAL));
         assertEquals(
                 Duration.ofSeconds(15),
                 configManager.getOperatorConfiguration().getReconcileInterval());
@@ -159,8 +169,20 @@ public class FlinkConfigManagerTest {
                 Duration.ofSeconds(15),
                 configManager
                         .getObserveConfig(deployment)
-                        .get(
-                                KubernetesOperatorConfigOptions
-                                        .OPERATOR_RECONCILER_RESCHEDULE_INTERVAL));
+                        .get(KubernetesOperatorConfigOptions.OPERATOR_RECONCILE_INTERVAL));
+    }
+
+    @Test
+    public void testConfigOverrides(@TempDir Path confOverrideDir) throws IOException {
+
+        assertEquals(
+                0, FlinkConfigManager.loadGlobalConfiguration(Optional.empty()).keySet().size());
+
+        Files.write(
+                confOverrideDir.resolve(GlobalConfiguration.FLINK_CONF_FILENAME),
+                Arrays.asList("foo: 1", "bar: 2"));
+        var conf =
+                FlinkConfigManager.loadGlobalConfiguration(Optional.of(confOverrideDir.toString()));
+        Assertions.assertEquals(Map.of("foo", "1", "bar", "2"), conf.toMap());
     }
 }

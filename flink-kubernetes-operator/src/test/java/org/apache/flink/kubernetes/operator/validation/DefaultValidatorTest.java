@@ -32,6 +32,8 @@ import org.apache.flink.kubernetes.operator.crd.spec.FlinkVersion;
 import org.apache.flink.kubernetes.operator.crd.spec.IngressSpec;
 import org.apache.flink.kubernetes.operator.crd.spec.JobSpec;
 import org.apache.flink.kubernetes.operator.crd.spec.JobState;
+import org.apache.flink.kubernetes.operator.crd.spec.KubernetesDeploymentMode;
+import org.apache.flink.kubernetes.operator.crd.spec.TaskManagerSpec;
 import org.apache.flink.kubernetes.operator.crd.spec.UpgradeMode;
 import org.apache.flink.kubernetes.operator.crd.status.FlinkDeploymentReconciliationStatus;
 import org.apache.flink.kubernetes.operator.crd.status.FlinkDeploymentStatus;
@@ -67,8 +69,17 @@ public class DefaultValidatorTest {
     public void testValidationWithoutDefaultConfig() {
         testSuccess(dep -> {});
 
+        // Test meta.name
+        testSuccess(dep -> dep.getMetadata().setName("session-cluster"));
+        testError(
+                dep -> dep.getMetadata().setName("session-cluster-1.13"),
+                "The FlinkDeployment name: session-cluster-1.13 is invalid, must consist of lower case alphanumeric characters or '-', start with an alphabetic character, and end with an alphanumeric character (e.g. 'my-name',  or 'abc-123'), and the length must be no more than 45 characters.");
+
         // Test job validation
         testError(dep -> dep.getSpec().getJob().setJarURI(null), "Jar URI must be defined");
+        testError(dep -> dep.getSpec().getJob().setJarURI(""), "Jar URI must be defined");
+        testError(dep -> dep.getSpec().getJob().setJarURI("  "), "Jar URI must be defined");
+
         testError(
                 dep -> dep.getSpec().getJob().setState(JobState.SUSPENDED),
                 "Job must start in running state");
@@ -76,9 +87,21 @@ public class DefaultValidatorTest {
         testError(
                 dep -> dep.getSpec().getJob().setParallelism(0),
                 "Job parallelism must be larger than 0");
+
         testError(
-                dep -> dep.getSpec().getJob().setParallelism(-1),
-                "Job parallelism must be larger than 0");
+                dep -> {
+                    var tmSpec = new TaskManagerSpec();
+                    tmSpec.setReplicas(0);
+                    dep.getSpec().setTaskManager(tmSpec);
+                },
+                "TaskManager replicas must be larger than 0");
+
+        testSuccess(
+                dep -> {
+                    dep.getSpec().getTaskManager().setReplicas(1);
+                    dep.getSpec().getJob().setParallelism(0);
+                });
+
         testError(
                 dep -> {
                     dep.getSpec().setFlinkConfiguration(new HashMap<>());
@@ -238,7 +261,7 @@ public class DefaultValidatorTest {
 
                     dep.getStatus()
                             .getReconciliationStatus()
-                            .serializeAndSetLastReconciledSpec(spec);
+                            .serializeAndSetLastReconciledSpec(spec, dep);
 
                     dep.getSpec()
                             .getFlinkConfiguration()
@@ -247,28 +270,6 @@ public class DefaultValidatorTest {
                                     "file:///flink-data/savepoints");
                     dep.getSpec().getJob().setUpgradeMode(UpgradeMode.SAVEPOINT);
                 });
-
-        testError(
-                dep -> {
-                    dep.setStatus(new FlinkDeploymentStatus());
-                    dep.getStatus().setJobStatus(new JobStatus());
-
-                    dep.getStatus()
-                            .setReconciliationStatus(new FlinkDeploymentReconciliationStatus());
-                    FlinkDeploymentSpec spec = ReconciliationUtils.clone(dep.getSpec());
-                    spec.getJob().setState(JobState.SUSPENDED);
-                    dep.getStatus()
-                            .getReconciliationStatus()
-                            .serializeAndSetLastReconciledSpec(spec);
-
-                    dep.getSpec()
-                            .getFlinkConfiguration()
-                            .put(
-                                    CheckpointingOptions.SAVEPOINT_DIRECTORY.key(),
-                                    "file:///flink-data/savepoints");
-                    dep.getSpec().getJob().setUpgradeMode(UpgradeMode.SAVEPOINT);
-                },
-                "Cannot perform savepoint restore without a valid savepoint");
 
         // Test cluster type validation
         testError(
@@ -281,7 +282,7 @@ public class DefaultValidatorTest {
                     dep.getStatus()
                             .getReconciliationStatus()
                             .serializeAndSetLastReconciledSpec(
-                                    ReconciliationUtils.clone(dep.getSpec()));
+                                    ReconciliationUtils.clone(dep.getSpec()), dep);
                     dep.getSpec().setJob(null);
                 },
                 "Cannot switch from job to session cluster");
@@ -297,9 +298,77 @@ public class DefaultValidatorTest {
                     spec.setJob(null);
                     dep.getStatus()
                             .getReconciliationStatus()
-                            .serializeAndSetLastReconciledSpec(spec);
+                            .serializeAndSetLastReconciledSpec(spec, dep);
                 },
                 "Cannot switch from session to job cluster");
+
+        testError(
+                dep -> {
+                    dep.setStatus(new FlinkDeploymentStatus());
+                    dep.getStatus().setJobStatus(new JobStatus());
+
+                    dep.getStatus()
+                            .setReconciliationStatus(new FlinkDeploymentReconciliationStatus());
+                    dep.getSpec().setMode(KubernetesDeploymentMode.STANDALONE);
+                    FlinkDeploymentSpec spec = ReconciliationUtils.clone(dep.getSpec());
+
+                    spec.setMode(KubernetesDeploymentMode.NATIVE);
+                    dep.getStatus()
+                            .getReconciliationStatus()
+                            .serializeAndSetLastReconciledSpec(spec, dep);
+                },
+                "Cannot switch from native kubernetes to standalone kubernetes cluster");
+
+        testError(
+                dep -> {
+                    dep.setStatus(new FlinkDeploymentStatus());
+                    dep.getStatus().setJobStatus(new JobStatus());
+
+                    dep.getStatus()
+                            .setReconciliationStatus(new FlinkDeploymentReconciliationStatus());
+                    dep.getSpec().setMode(KubernetesDeploymentMode.STANDALONE);
+                    FlinkDeploymentSpec spec = ReconciliationUtils.clone(dep.getSpec());
+
+                    spec.setMode(null);
+                    dep.getStatus()
+                            .getReconciliationStatus()
+                            .serializeAndSetLastReconciledSpec(spec, dep);
+                },
+                "Cannot switch from native kubernetes to standalone kubernetes cluster");
+
+        testError(
+                dep -> {
+                    dep.setStatus(new FlinkDeploymentStatus());
+                    dep.getStatus().setJobStatus(new JobStatus());
+
+                    dep.getStatus()
+                            .setReconciliationStatus(new FlinkDeploymentReconciliationStatus());
+                    dep.getSpec().setMode(null);
+                    FlinkDeploymentSpec spec = ReconciliationUtils.clone(dep.getSpec());
+
+                    spec.setMode(KubernetesDeploymentMode.STANDALONE);
+                    dep.getStatus()
+                            .getReconciliationStatus()
+                            .serializeAndSetLastReconciledSpec(spec, dep);
+                },
+                "Cannot switch from standalone kubernetes to native kubernetes cluster");
+
+        testError(
+                dep -> {
+                    dep.setStatus(new FlinkDeploymentStatus());
+                    dep.getStatus().setJobStatus(new JobStatus());
+
+                    dep.getStatus()
+                            .setReconciliationStatus(new FlinkDeploymentReconciliationStatus());
+                    dep.getSpec().setMode(KubernetesDeploymentMode.NATIVE);
+                    FlinkDeploymentSpec spec = ReconciliationUtils.clone(dep.getSpec());
+
+                    spec.setMode(KubernetesDeploymentMode.STANDALONE);
+                    dep.getStatus()
+                            .getReconciliationStatus()
+                            .serializeAndSetLastReconciledSpec(spec, dep);
+                },
+                "Cannot switch from standalone kubernetes to native kubernetes cluster");
 
         // Test upgrade mode change validation
         testError(
@@ -319,7 +388,7 @@ public class DefaultValidatorTest {
 
                     dep.getStatus()
                             .getReconciliationStatus()
-                            .serializeAndSetLastReconciledSpec(spec);
+                            .serializeAndSetLastReconciledSpec(spec, dep);
                     dep.getStatus().setJobManagerDeploymentStatus(JobManagerDeploymentStatus.READY);
                 },
                 String.format(
@@ -423,12 +492,12 @@ public class DefaultValidatorTest {
                             .setFlinkConfiguration(
                                     Map.of(
                                             KubernetesOperatorConfigOptions
-                                                    .OPERATOR_RECONCILER_RESCHEDULE_INTERVAL
+                                                    .OPERATOR_RECONCILE_INTERVAL
                                                     .key(),
                                             "60"));
                 },
                 flinkDeployment -> {},
-                "Invalid session job flinkConfiguration key: kubernetes.operator.reconciler.reschedule.interval."
+                "Invalid session job flinkConfiguration key: kubernetes.operator.reconcile.interval."
                         + " Allowed keys are [kubernetes.operator.user.artifacts.http.header]");
     }
 

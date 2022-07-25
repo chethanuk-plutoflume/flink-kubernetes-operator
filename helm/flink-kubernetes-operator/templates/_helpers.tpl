@@ -74,7 +74,7 @@ Create the name of the operator service account to use
 {{- if .Values.operatorServiceAccount.create }}
 {{- default (include "flink-operator.fullname" .) .Values.operatorServiceAccount.name }}
 {{- else }}
-{{- default "default" .Values.serviceAccount.name }}
+{{- default "default" .Values.operatorServiceAccount.name }}
 {{- end }}
 {{- end }}
 
@@ -86,5 +86,45 @@ Create the name of the job service account to use
 {{- default (include "flink-operator.fullname" .) .Values.jobServiceAccount.name }}
 {{- else }}
 {{- default "default" .Values.jobServiceAccount.name }}
+{{- end }}
+{{- end }}
+
+{{- define "validating-webhook-enabled" -}}
+{{- if hasKey .Values.webhook "validator" }}
+{{- if .Values.webhook.validator.create }}
+{{- printf "true" }}
+{{- else }}
+{{- printf "false" }}
+{{- end }}
+{{- else }}
+{{- if or (.Values.webhook.create) }}
+{{- printf "true" }}
+{{- else }}
+{{- printf "false" }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{- define "mutating-webhook-enabled" -}}
+{{- if hasKey .Values.webhook "mutator" }}
+{{- if .Values.webhook.mutator.create }}
+{{- printf "true" }}
+{{- else }}
+{{- printf "false" }}
+{{- end }}
+{{- else }}
+{{- if or (.Values.webhook.create) }}
+{{- printf "true" }}
+{{- else }}
+{{- printf "false" }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{- define "webhook-enabled" -}}
+{{- if or (eq (include "validating-webhook-enabled" .) "true") (eq (include "mutating-webhook-enabled" .) "true") }}
+{{- printf "true" }}
+{{- else }}
+{{- printf "false" }}
 {{- end }}
 {{- end }}

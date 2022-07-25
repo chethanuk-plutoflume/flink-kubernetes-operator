@@ -18,23 +18,20 @@
 package org.apache.flink.kubernetes.operator.controller;
 
 import org.apache.flink.api.common.JobStatus;
-import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
 import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.crd.status.FlinkDeploymentStatus;
 import org.apache.flink.kubernetes.operator.crd.status.JobManagerDeploymentStatus;
 import org.apache.flink.kubernetes.operator.exception.DeploymentFailedException;
 import org.apache.flink.kubernetes.operator.exception.ReconciliationException;
-import org.apache.flink.kubernetes.operator.metrics.MetricManager;
 import org.apache.flink.kubernetes.operator.observer.deployment.ObserverFactory;
 import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
 import org.apache.flink.kubernetes.operator.reconciler.deployment.ReconcilerFactory;
+import org.apache.flink.kubernetes.operator.utils.EventRecorder;
 import org.apache.flink.kubernetes.operator.utils.EventSourceUtils;
-import org.apache.flink.kubernetes.operator.utils.EventUtils;
-import org.apache.flink.kubernetes.operator.utils.StatusHelper;
+import org.apache.flink.kubernetes.operator.utils.StatusRecorder;
 import org.apache.flink.kubernetes.operator.validation.FlinkResourceValidator;
 
-import io.fabric8.kubernetes.client.KubernetesClient;
 import io.javaoperatorsdk.operator.api.reconciler.Cleaner;
 import io.javaoperatorsdk.operator.api.reconciler.Context;
 import io.javaoperatorsdk.operator.api.reconciler.ControllerConfiguration;
@@ -52,7 +49,6 @@ import org.slf4j.LoggerFactory;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 
 /** Controller that runs the main reconcile loop for Flink deployments. */
 @ControllerConfiguration()
@@ -64,44 +60,38 @@ public class FlinkDeploymentController
     private static final Logger LOG = LoggerFactory.getLogger(FlinkDeploymentController.class);
 
     private final FlinkConfigManager configManager;
-    private final KubernetesClient kubernetesClient;
 
     private final Set<FlinkResourceValidator> validators;
     private final ReconcilerFactory reconcilerFactory;
     private final ObserverFactory observerFactory;
-    private final MetricManager<FlinkDeployment> metricManager;
-    private final StatusHelper<FlinkDeploymentStatus> statusHelper;
-    private final ConcurrentHashMap<Tuple2<String, String>, FlinkDeploymentStatus> statusCache =
-            new ConcurrentHashMap<>();
+    private final StatusRecorder<FlinkDeploymentStatus> statusRecorder;
+    private final EventRecorder eventRecorder;
 
     public FlinkDeploymentController(
             FlinkConfigManager configManager,
-            KubernetesClient kubernetesClient,
             Set<FlinkResourceValidator> validators,
             ReconcilerFactory reconcilerFactory,
             ObserverFactory observerFactory,
-            MetricManager<FlinkDeployment> metricManager,
-            StatusHelper<FlinkDeploymentStatus> statusHelper) {
+            StatusRecorder<FlinkDeploymentStatus> statusRecorder,
+            EventRecorder eventRecorder) {
         this.configManager = configManager;
-        this.kubernetesClient = kubernetesClient;
         this.validators = validators;
         this.reconcilerFactory = reconcilerFactory;
         this.observerFactory = observerFactory;
-        this.metricManager = metricManager;
-        this.statusHelper = statusHelper;
+        this.statusRecorder = statusRecorder;
+        this.eventRecorder = eventRecorder;
     }
 
     @Override
     public DeleteControl cleanup(FlinkDeployment flinkApp, Context context) {
         LOG.info("Deleting FlinkDeployment");
-        statusHelper.updateStatusFromCache(flinkApp);
+        statusRecorder.updateStatusFromCache(flinkApp);
         try {
             observerFactory.getOrCreate(flinkApp).observe(flinkApp, context);
         } catch (DeploymentFailedException dfe) {
             // ignore during cleanup
         }
-        metricManager.onRemove(flinkApp);
-        statusHelper.removeCachedStatus(flinkApp);
+        statusRecorder.removeCachedStatus(flinkApp);
         return reconcilerFactory.getOrCreate(flinkApp).cleanup(flinkApp, context);
     }
 
@@ -109,19 +99,19 @@ public class FlinkDeploymentController
     public UpdateControl<FlinkDeployment> reconcile(FlinkDeployment flinkApp, Context context)
             throws Exception {
         LOG.info("Starting reconciliation");
-        statusHelper.updateStatusFromCache(flinkApp);
+        statusRecorder.updateStatusFromCache(flinkApp);
         FlinkDeployment previousDeployment = ReconciliationUtils.clone(flinkApp);
         try {
             observerFactory.getOrCreate(flinkApp).observe(flinkApp, context);
             if (!validateDeployment(flinkApp)) {
-                metricManager.onUpdate(flinkApp);
-                statusHelper.patchAndCacheStatus(flinkApp);
+                statusRecorder.patchAndCacheStatus(flinkApp);
                 return ReconciliationUtils.toUpdateControl(
                         configManager.getOperatorConfiguration(),
                         flinkApp,
                         previousDeployment,
                         false);
             }
+            statusRecorder.patchAndCacheStatus(flinkApp);
             reconcilerFactory.getOrCreate(flinkApp).reconcile(flinkApp, context);
         } catch (DeploymentFailedException dfe) {
             handleDeploymentFailed(flinkApp, dfe);
@@ -130,8 +120,7 @@ public class FlinkDeploymentController
         }
 
         LOG.info("End of reconciliation");
-        metricManager.onUpdate(flinkApp);
-        statusHelper.patchAndCacheStatus(flinkApp);
+        statusRecorder.patchAndCacheStatus(flinkApp);
         return ReconciliationUtils.toUpdateControl(
                 configManager.getOperatorConfiguration(), flinkApp, previousDeployment, true);
     }
@@ -141,13 +130,12 @@ public class FlinkDeploymentController
         flinkApp.getStatus().setJobManagerDeploymentStatus(JobManagerDeploymentStatus.ERROR);
         flinkApp.getStatus().getJobStatus().setState(JobStatus.RECONCILING.name());
         ReconciliationUtils.updateForReconciliationError(flinkApp, dfe.getMessage());
-        EventUtils.createOrUpdateEvent(
-                kubernetesClient,
+        eventRecorder.triggerEvent(
                 flinkApp,
-                EventUtils.Type.Warning,
+                EventRecorder.Type.Warning,
                 dfe.getReason(),
                 dfe.getMessage(),
-                EventUtils.Component.JobManagerDeployment);
+                EventRecorder.Component.JobManagerDeployment);
     }
 
     @Override
@@ -162,7 +150,7 @@ public class FlinkDeploymentController
     public ErrorStatusUpdateControl<FlinkDeployment> updateErrorStatus(
             FlinkDeployment flinkDeployment, Context<FlinkDeployment> context, Exception e) {
         return ReconciliationUtils.toErrorStatusUpdateControl(
-                flinkDeployment, context.getRetryInfo(), e, metricManager, statusHelper);
+                flinkDeployment, context.getRetryInfo(), e, statusRecorder);
     }
 
     private boolean validateDeployment(FlinkDeployment deployment) {

@@ -32,6 +32,7 @@ import org.apache.flink.kubernetes.operator.crd.spec.IngressSpec;
 import org.apache.flink.kubernetes.operator.crd.spec.JobManagerSpec;
 import org.apache.flink.kubernetes.operator.crd.spec.JobSpec;
 import org.apache.flink.kubernetes.operator.crd.spec.JobState;
+import org.apache.flink.kubernetes.operator.crd.spec.KubernetesDeploymentMode;
 import org.apache.flink.kubernetes.operator.crd.spec.Resource;
 import org.apache.flink.kubernetes.operator.crd.spec.TaskManagerSpec;
 import org.apache.flink.kubernetes.operator.crd.spec.UpgradeMode;
@@ -43,13 +44,18 @@ import org.apache.flink.kubernetes.operator.utils.IngressUtils;
 import org.apache.flink.kubernetes.utils.Constants;
 import org.apache.flink.util.StringUtils;
 
+import javax.annotation.Nullable;
+
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** Default validator implementation for {@link FlinkDeployment}. */
 public class DefaultValidator implements FlinkResourceValidator {
-
+    private static final Pattern DEPLOYMENT_NAME_PATTERN =
+            Pattern.compile("[a-z]([-a-z\\d]{0,43}[a-z\\d])?");
     private static final String[] FORBIDDEN_CONF_KEYS =
             new String[] {
                 KubernetesConfigOptions.NAMESPACE.key(), KubernetesConfigOptions.CLUSTER_ID.key()
@@ -75,6 +81,7 @@ public class DefaultValidator implements FlinkResourceValidator {
             effectiveConfig.putAll(spec.getFlinkConfiguration());
         }
         return firstPresent(
+                validateDeploymentName(deployment.getMetadata().getName()),
                 validateFlinkVersion(spec.getFlinkVersion()),
                 validateFlinkDeploymentConfig(effectiveConfig),
                 validateIngress(
@@ -82,7 +89,11 @@ public class DefaultValidator implements FlinkResourceValidator {
                         deployment.getMetadata().getName(),
                         deployment.getMetadata().getNamespace()),
                 validateLogConfig(spec.getLogConfiguration()),
-                validateJobSpec(spec.getJob(), effectiveConfig),
+                validateJobSpec(
+                        spec.getJob(),
+                        spec.getTaskManager(),
+                        effectiveConfig,
+                        KubernetesDeploymentMode.getDeploymentMode(deployment)),
                 validateJmSpec(spec.getJobManager(), effectiveConfig),
                 validateTmSpec(spec.getTaskManager()),
                 validateSpecChange(deployment, effectiveConfig),
@@ -94,6 +105,17 @@ public class DefaultValidator implements FlinkResourceValidator {
             if (opt.isPresent()) {
                 return opt;
             }
+        }
+        return Optional.empty();
+    }
+
+    private Optional<String> validateDeploymentName(String name) {
+        Matcher matcher = DEPLOYMENT_NAME_PATTERN.matcher(name);
+        if (!matcher.matches()) {
+            return Optional.of(
+                    String.format(
+                            "The FlinkDeployment name: %s is invalid, must consist of lower case alphanumeric characters or '-', start with an alphabetic character, and end with an alphanumeric character (e.g. 'my-name',  or 'abc-123'), and the length must be no more than 45 characters.",
+                            name));
         }
         return Optional.empty();
     }
@@ -155,16 +177,16 @@ public class DefaultValidator implements FlinkResourceValidator {
         return Optional.empty();
     }
 
-    private Optional<String> validateJobSpec(JobSpec job, Map<String, String> confMap) {
+    private Optional<String> validateJobSpec(
+            JobSpec job,
+            @Nullable TaskManagerSpec tm,
+            Map<String, String> confMap,
+            KubernetesDeploymentMode mode) {
         if (job == null) {
             return Optional.empty();
         }
 
-        if (job.getParallelism() < 1) {
-            return Optional.of("Job parallelism must be larger than 0");
-        }
-
-        if (job.getJarURI() == null) {
+        if (StringUtils.isNullOrWhitespaceOnly(job.getJarURI())) {
             return Optional.of("Jar URI must be defined");
         }
 
@@ -206,6 +228,14 @@ public class DefaultValidator implements FlinkResourceValidator {
             }
         }
 
+        var tmReplicasDefined = tm != null && tm.getReplicas() != null;
+
+        if (tmReplicasDefined && tm.getReplicas() < 1) {
+            return Optional.of("TaskManager replicas must be larger than 0");
+        } else if (!tmReplicasDefined && job.getParallelism() < 1) {
+            return Optional.of("Job parallelism must be larger than 0");
+        }
+
         return Optional.empty();
     }
 
@@ -235,6 +265,10 @@ public class DefaultValidator implements FlinkResourceValidator {
             return Optional.empty();
         }
 
+        if (tmSpec.getReplicas() != null && tmSpec.getReplicas() < 1) {
+            return Optional.of("TaskManager replicas should not be configured less than one.");
+        }
+
         return validateResources("TaskManager", tmSpec.getResource());
     }
 
@@ -261,11 +295,7 @@ public class DefaultValidator implements FlinkResourceValidator {
             FlinkDeployment deployment, Map<String, String> effectiveConfig) {
         FlinkDeploymentSpec newSpec = deployment.getSpec();
 
-        if (deployment.getStatus() == null
-                || deployment.getStatus().getReconciliationStatus() == null
-                || deployment.getStatus().getReconciliationStatus().getLastReconciledSpec()
-                        == null) {
-            // New deployment
+        if (deployment.getStatus().getReconciliationStatus().isFirstDeployment()) {
             if (newSpec.getJob() != null && !newSpec.getJob().getState().equals(JobState.RUNNING)) {
                 return Optional.of("Job must start in running state");
             }
@@ -284,23 +314,33 @@ public class DefaultValidator implements FlinkResourceValidator {
             return Optional.of("Cannot switch from job to session cluster");
         }
 
+        KubernetesDeploymentMode oldDeploymentMode =
+                oldSpec.getMode() == null ? KubernetesDeploymentMode.NATIVE : oldSpec.getMode();
+
+        KubernetesDeploymentMode newDeploymentMode =
+                newSpec.getMode() == null ? KubernetesDeploymentMode.NATIVE : newSpec.getMode();
+
+        if (oldDeploymentMode == KubernetesDeploymentMode.NATIVE
+                && newDeploymentMode != KubernetesDeploymentMode.NATIVE) {
+            return Optional.of(
+                    "Cannot switch from native kubernetes to standalone kubernetes cluster");
+        }
+
+        if (oldDeploymentMode == KubernetesDeploymentMode.STANDALONE
+                && newDeploymentMode != KubernetesDeploymentMode.STANDALONE) {
+            return Optional.of(
+                    "Cannot switch from standalone kubernetes to native kubernetes cluster");
+        }
+
         JobSpec oldJob = oldSpec.getJob();
         JobSpec newJob = newSpec.getJob();
         if (oldJob != null && newJob != null) {
-            if (oldJob.getState() == JobState.SUSPENDED
-                    && newJob.getState() == JobState.RUNNING
-                    && newJob.getUpgradeMode() == UpgradeMode.SAVEPOINT
-                    && (deployment.getStatus().getJobStatus().getSavepointInfo().getLastSavepoint()
-                            == null)) {
-                return Optional.of("Cannot perform savepoint restore without a valid savepoint");
-            }
-
             if (StringUtils.isNullOrWhitespaceOnly(
                             effectiveConfig.get(CheckpointingOptions.SAVEPOINT_DIRECTORY.key()))
                     && deployment.getStatus().getJobManagerDeploymentStatus()
                             != JobManagerDeploymentStatus.MISSING
                     && ReconciliationUtils.isUpgradeModeChangedToLastStateAndHADisabledPreviously(
-                            deployment, configManager)) {
+                            deployment, configManager.getObserveConfig(deployment))) {
                 return Optional.of(
                         String.format(
                                 "Job could not be upgraded to last-state while config key[%s] is not set",
@@ -344,7 +384,11 @@ public class DefaultValidator implements FlinkResourceValidator {
         return firstPresent(
                 validateNotApplicationCluster(sessionCluster),
                 validateSessionClusterId(sessionJob, sessionCluster),
-                validateJobSpec(sessionJob.getSpec().getJob(), effectiveConfig));
+                validateJobSpec(
+                        sessionJob.getSpec().getJob(),
+                        null,
+                        effectiveConfig,
+                        KubernetesDeploymentMode.getDeploymentMode(sessionCluster)));
     }
 
     private Optional<String> validateJobNotEmpty(FlinkSessionJob sessionJob) {
@@ -396,19 +440,6 @@ public class DefaultValidator implements FlinkResourceValidator {
             }
 
             return Optional.empty();
-        }
-
-        FlinkSessionJobSpec oldSpec =
-                sessionJob.getStatus().getReconciliationStatus().deserializeLastReconciledSpec();
-
-        JobSpec oldJob = oldSpec.getJob();
-        JobSpec newJob = newSpec.getJob();
-        if (oldJob.getState() == JobState.SUSPENDED
-                && newJob.getState() == JobState.RUNNING
-                && newJob.getUpgradeMode() == UpgradeMode.SAVEPOINT
-                && (sessionJob.getStatus().getJobStatus().getSavepointInfo().getLastSavepoint()
-                        == null)) {
-            return Optional.of("Cannot perform savepoint restore without a valid savepoint");
         }
 
         return Optional.empty();

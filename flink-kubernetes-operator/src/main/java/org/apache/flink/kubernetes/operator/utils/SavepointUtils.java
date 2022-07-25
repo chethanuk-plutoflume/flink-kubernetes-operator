@@ -19,7 +19,6 @@ package org.apache.flink.kubernetes.operator.utils;
 
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.kubernetes.operator.config.FlinkOperatorConfiguration;
 import org.apache.flink.kubernetes.operator.config.KubernetesOperatorConfigOptions;
 import org.apache.flink.kubernetes.operator.crd.AbstractFlinkResource;
 import org.apache.flink.kubernetes.operator.crd.status.JobStatus;
@@ -28,7 +27,6 @@ import org.apache.flink.kubernetes.operator.crd.status.SavepointTriggerType;
 import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
 import org.apache.flink.kubernetes.operator.service.FlinkService;
 
-import io.fabric8.kubernetes.client.KubernetesClient;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -53,6 +51,7 @@ public class SavepointUtils {
      * @param resource Resource that should be savepointed
      * @param conf Observe config of the resource
      * @return True if a savepoint was triggered
+     * @throws Exception Error during savepoint triggering.
      */
     public static boolean triggerSavepointIfNeeded(
             FlinkService flinkService, AbstractFlinkResource<?, ?> resource, Configuration conf)
@@ -70,9 +69,6 @@ public class SavepointUtils {
                 resource.getStatus().getJobStatus().getSavepointInfo(),
                 conf);
 
-        if (triggerType == SavepointTriggerType.MANUAL) {
-            ReconciliationUtils.updateSavepointReconciliationSuccess(resource);
-        }
         return true;
     }
 
@@ -135,29 +131,31 @@ public class SavepointUtils {
         return Optional.empty();
     }
 
-    public static boolean gracePeriodEnded(
-            FlinkOperatorConfiguration configuration, SavepointInfo savepointInfo) {
-        var elapsed = System.currentTimeMillis() - savepointInfo.getTriggerTimestamp();
-        return elapsed > configuration.getSavepointTriggerGracePeriod().toMillis();
+    public static boolean gracePeriodEnded(Configuration conf, SavepointInfo savepointInfo) {
+        Duration gracePeriod =
+                conf.get(KubernetesOperatorConfigOptions.OPERATOR_SAVEPOINT_TRIGGER_GRACE_PERIOD);
+        var endOfGracePeriod =
+                Instant.ofEpochMilli(savepointInfo.getTriggerTimestamp()).plus(gracePeriod);
+        return endOfGracePeriod.isBefore(Instant.now());
     }
 
     public static void resetTriggerIfJobNotRunning(
-            KubernetesClient client, AbstractFlinkResource<?, ?> resource) {
+            AbstractFlinkResource<?, ?> resource, EventRecorder eventRecorder) {
         var status = resource.getStatus();
         var jobStatus = status.getJobStatus();
         if (!ReconciliationUtils.isJobRunning(status)
                 && SavepointUtils.savepointInProgress(jobStatus)) {
             var savepointInfo = jobStatus.getSavepointInfo();
+            ReconciliationUtils.updateLastReconciledSavepointTriggerNonce(savepointInfo, resource);
             savepointInfo.resetTrigger();
             LOG.error("Job is not running, cancelling savepoint operation");
-            EventUtils.createOrUpdateEvent(
-                    client,
+            eventRecorder.triggerEvent(
                     resource,
-                    EventUtils.Type.Warning,
-                    "SavepointError",
+                    EventRecorder.Type.Warning,
+                    EventRecorder.Reason.SavepointError,
+                    EventRecorder.Component.Operator,
                     createSavepointError(
-                            savepointInfo, resource.getSpec().getJob().getSavepointTriggerNonce()),
-                    EventUtils.Component.Operator);
+                            savepointInfo, resource.getSpec().getJob().getSavepointTriggerNonce()));
         }
     }
 

@@ -20,6 +20,7 @@ package org.apache.flink.kubernetes.operator.crd.spec;
 import org.apache.flink.annotation.Experimental;
 
 import io.fabric8.kubernetes.api.model.Pod;
+import io.fabric8.kubernetes.model.annotation.SpecReplicas;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -32,6 +33,9 @@ import lombok.NoArgsConstructor;
 public class TaskManagerSpec {
     /** Resource specification for the TaskManager pods. */
     private Resource resource;
+
+    /** Number of TaskManager replicas. If defined, takes precedence over parallelism */
+    @SpecReplicas private Integer replicas;
 
     /** TaskManager pod template. It will be merged with FlinkDeploymentSpec.podTemplate. */
     private Pod podTemplate;

@@ -35,7 +35,7 @@ RUN cd /app/tools/license; mkdir jars; cd jars; \
 # stage
 FROM openjdk:11-jre
 ENV FLINK_HOME=/opt/flink
-ENV OPERATOR_VERSION=1.1-SNAPSHOT
+ENV OPERATOR_VERSION=1.2-SNAPSHOT
 ENV OPERATOR_JAR=flink-kubernetes-operator-$OPERATOR_VERSION-shaded.jar
 ENV WEBHOOK_JAR=flink-kubernetes-webhook-$OPERATOR_VERSION-shaded.jar
 ENV FLINK_KUBERNETES_SHADED_JAR=flink-kubernetes-shaded-$OPERATOR_VERSION.jar
@@ -58,9 +58,12 @@ RUN chown -R flink:flink $FLINK_HOME && \
     chown flink:flink $FLINK_KUBERNETES_SHADED_JAR && \
     chown flink:flink /docker-entrypoint.sh
 
+
+ARG SKIP_OS_UPDATE=true
+
 # Updating Debian
-RUN apt-get update
-RUN apt-get upgrade -y
+RUN if [ "$SKIP_OS_UPDATE" = "false" ]; then apt-get update; fi
+RUN if [ "$SKIP_OS_UPDATE" = "false" ]; then apt-get upgrade -y; fi
 
 USER flink
 ENTRYPOINT ["/docker-entrypoint.sh"]

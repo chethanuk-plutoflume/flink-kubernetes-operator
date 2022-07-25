@@ -19,7 +19,10 @@ package org.apache.flink.kubernetes.operator.crd.status;
 
 import org.apache.flink.annotation.Experimental;
 import org.apache.flink.kubernetes.operator.crd.spec.AbstractFlinkSpec;
+import org.apache.flink.kubernetes.operator.crd.spec.JobState;
+import org.apache.flink.kubernetes.operator.metrics.lifecycle.ResourceLifecycleState;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -37,8 +40,49 @@ public abstract class CommonStatus<SPEC extends AbstractFlinkSpec> {
     private JobStatus jobStatus = new JobStatus();
 
     /** Error information about the FlinkDeployment/FlinkSessionJob. */
-    private String error;
+    private String error = "";
 
-    /** Status of the last reconcile operation. */
+    /**
+     * Current reconciliation status of this resource.
+     *
+     * @return Current {@link ReconciliationStatus}.
+     */
     public abstract ReconciliationStatus<SPEC> getReconciliationStatus();
+
+    @JsonIgnore
+    public ResourceLifecycleState getLifecycleState() {
+        var reconciliationStatus = getReconciliationStatus();
+
+        if (reconciliationStatus.isFirstDeployment()) {
+            return ResourceLifecycleState.CREATED;
+        }
+
+        switch (reconciliationStatus.getState()) {
+            case UPGRADING:
+                return ResourceLifecycleState.UPGRADING;
+            case ROLLING_BACK:
+                return ResourceLifecycleState.ROLLING_BACK;
+        }
+
+        var lastReconciledSpec = reconciliationStatus.deserializeLastReconciledSpec();
+        if (lastReconciledSpec.getJob() != null
+                && lastReconciledSpec.getJob().getState() == JobState.SUSPENDED) {
+            return ResourceLifecycleState.SUSPENDED;
+        }
+
+        var jobState = getJobStatus().getState();
+        if (jobState != null
+                && org.apache.flink.api.common.JobStatus.valueOf(jobState)
+                        == org.apache.flink.api.common.JobStatus.FAILED) {
+            return ResourceLifecycleState.FAILED;
+        }
+
+        if (reconciliationStatus.getState() == ReconciliationState.ROLLED_BACK) {
+            return ResourceLifecycleState.ROLLED_BACK;
+        } else if (reconciliationStatus.isLastReconciledSpecStable()) {
+            return ResourceLifecycleState.STABLE;
+        }
+
+        return ResourceLifecycleState.DEPLOYED;
+    }
 }

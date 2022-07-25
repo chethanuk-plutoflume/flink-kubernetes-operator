@@ -27,11 +27,13 @@ import io.fabric8.kubernetes.api.model.apps.Deployment;
 import io.javaoperatorsdk.operator.api.config.informer.InformerConfiguration;
 import io.javaoperatorsdk.operator.api.reconciler.EventSourceContext;
 import io.javaoperatorsdk.operator.processing.event.ResourceID;
+import io.javaoperatorsdk.operator.processing.event.source.PrimaryToSecondaryMapper;
 import io.javaoperatorsdk.operator.processing.event.source.informer.InformerEventSource;
 import io.javaoperatorsdk.operator.processing.event.source.informer.Mappers;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /** Utility class to locate secondary resources. */
@@ -43,11 +45,7 @@ public class EventSourceUtils {
     public static InformerEventSource<Deployment, FlinkDeployment> getDeploymentInformerEventSource(
             EventSourceContext<FlinkDeployment> context) {
         final String labelSelector =
-                Map.of(
-                                Constants.LABEL_TYPE_KEY,
-                                Constants.LABEL_TYPE_NATIVE_TYPE,
-                                Constants.LABEL_COMPONENT_KEY,
-                                Constants.LABEL_COMPONENT_JOB_MANAGER)
+                Map.of(Constants.LABEL_COMPONENT_KEY, Constants.LABEL_COMPONENT_JOB_MANAGER)
                         .entrySet().stream()
                         .map(Object::toString)
                         .collect(Collectors.joining(","));
@@ -69,7 +67,11 @@ public class EventSourceUtils {
         context.getPrimaryCache()
                 .addIndexer(
                         FLINK_DEPLOYMENT_IDX,
-                        flinkDeployment -> List.of(flinkDeployment.getMetadata().getName()));
+                        flinkDeployment ->
+                                List.of(
+                                        indexKey(
+                                                flinkDeployment.getMetadata().getName(),
+                                                flinkDeployment.getMetadata().getNamespace())));
 
         InformerConfiguration<FlinkSessionJob> configuration =
                 InformerConfiguration.from(FlinkSessionJob.class, context)
@@ -78,7 +80,13 @@ public class EventSourceUtils {
                                         context.getPrimaryCache()
                                                 .byIndex(
                                                         FLINK_DEPLOYMENT_IDX,
-                                                        sessionJob.getSpec().getDeploymentName())
+                                                        indexKey(
+                                                                sessionJob
+                                                                        .getSpec()
+                                                                        .getDeploymentName(),
+                                                                sessionJob
+                                                                        .getMetadata()
+                                                                        .getNamespace()))
                                                 .stream()
                                                 .map(ResourceID::fromResource)
                                                 .collect(Collectors.toSet()))
@@ -94,7 +102,11 @@ public class EventSourceUtils {
         context.getPrimaryCache()
                 .addIndexer(
                         FLINK_SESSIONJOB_IDX,
-                        sessionJob -> List.of(sessionJob.getSpec().getDeploymentName()));
+                        sessionJob ->
+                                List.of(
+                                        indexKey(
+                                                sessionJob.getSpec().getDeploymentName(),
+                                                sessionJob.getMetadata().getNamespace())));
 
         InformerConfiguration<FlinkDeployment> configuration =
                 InformerConfiguration.from(FlinkDeployment.class, context)
@@ -103,14 +115,34 @@ public class EventSourceUtils {
                                         context.getPrimaryCache()
                                                 .byIndex(
                                                         FLINK_SESSIONJOB_IDX,
-                                                        flinkDeployment.getMetadata().getName())
+                                                        indexKey(
+                                                                flinkDeployment
+                                                                        .getMetadata()
+                                                                        .getName(),
+                                                                flinkDeployment
+                                                                        .getMetadata()
+                                                                        .getNamespace()))
                                                 .stream()
                                                 .map(ResourceID::fromResource)
                                                 .collect(Collectors.toSet()))
+                        .withPrimaryToSecondaryMapper(
+                                (PrimaryToSecondaryMapper<FlinkSessionJob>)
+                                        sessionJob ->
+                                                Set.of(
+                                                        new ResourceID(
+                                                                sessionJob
+                                                                        .getSpec()
+                                                                        .getDeploymentName(),
+                                                                sessionJob
+                                                                        .getMetadata()
+                                                                        .getNamespace())))
                         .withNamespacesInheritedFromController(context)
                         .followNamespaceChanges(true)
                         .build();
-
         return new InformerEventSource<>(configuration, context);
+    }
+
+    private static String indexKey(String name, String namespace) {
+        return name + "#" + namespace;
     }
 }

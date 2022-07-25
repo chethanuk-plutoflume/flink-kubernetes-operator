@@ -17,12 +17,14 @@
 
 package org.apache.flink.kubernetes.operator.utils;
 
+import io.fabric8.kubernetes.api.model.Event;
 import io.fabric8.kubernetes.api.model.EventBuilder;
 import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.ObjectReferenceBuilder;
 import io.fabric8.kubernetes.client.KubernetesClient;
 
 import java.time.Instant;
+import java.util.function.Consumer;
 
 /**
  * The util to generate an event for the target resource. It is copied from
@@ -30,23 +32,20 @@ import java.time.Instant;
  */
 public class EventUtils {
 
-    /** The type of the events. */
-    public enum Type {
-        Normal,
-        Warning
-    }
-
-    /** The component of events. */
-    public enum Component {
-        Operator,
-        JobManagerDeployment
-    }
-
     public static String generateEventName(
-            HasMetadata target, Type type, String reason, String message, Component component) {
+            HasMetadata target,
+            EventRecorder.Type type,
+            String reason,
+            String message,
+            EventRecorder.Component component) {
         return component
                 + "."
-                + ((reason + message + type + target.getKind() + target.getMetadata().getName())
+                + ((reason
+                                        + message
+                                        + type
+                                        + target.getKind()
+                                        + target.getMetadata().getName()
+                                        + target.getMetadata().getUid())
                                 .hashCode()
                         & 0x7FFFFFFF);
     }
@@ -54,10 +53,11 @@ public class EventUtils {
     public static boolean createOrUpdateEvent(
             KubernetesClient client,
             HasMetadata target,
-            Type type,
+            EventRecorder.Type type,
             String reason,
             String message,
-            Component component) {
+            EventRecorder.Component component,
+            Consumer<Event> eventListener) {
         var eventName = generateEventName(target, type, reason, message, component);
 
         var existing =
@@ -80,6 +80,7 @@ public class EventUtils {
                     .events()
                     .inNamespace(target.getMetadata().getNamespace())
                     .createOrReplace(existing);
+            eventListener.accept(existing);
             return false;
         } else {
             var event =
@@ -107,6 +108,7 @@ public class EventUtils {
                             .endMetadata()
                             .build();
             client.v1().events().inNamespace(target.getMetadata().getNamespace()).create(event);
+            eventListener.accept(event);
             return true;
         }
     }

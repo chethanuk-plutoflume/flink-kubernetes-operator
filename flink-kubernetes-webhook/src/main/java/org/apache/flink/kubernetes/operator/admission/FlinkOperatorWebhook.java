@@ -17,6 +17,8 @@
 
 package org.apache.flink.kubernetes.operator.admission;
 
+import org.apache.flink.kubernetes.operator.admission.informer.InformerManager;
+import org.apache.flink.kubernetes.operator.admission.mutator.FlinkMutator;
 import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
 import org.apache.flink.kubernetes.operator.utils.EnvUtils;
 import org.apache.flink.kubernetes.operator.utils.ValidatorUtils;
@@ -36,7 +38,7 @@ import org.apache.flink.shaded.netty4.io.netty.handler.ssl.SslContextBuilder;
 import org.apache.flink.shaded.netty4.io.netty.handler.ssl.SupportedCipherSuiteFilter;
 import org.apache.flink.shaded.netty4.io.netty.handler.stream.ChunkedWriteHandler;
 
-import org.apache.commons.lang3.StringUtils;
+import io.fabric8.kubernetes.client.DefaultKubernetesClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -58,10 +60,18 @@ public class FlinkOperatorWebhook {
 
     public static void main(String[] args) throws Exception {
         EnvUtils.logEnvironmentInfo(LOG, "Flink Kubernetes Webhook", args);
-        FlinkConfigManager configManager = new FlinkConfigManager();
+        var informerManager = new InformerManager(new DefaultKubernetesClient());
+        var configManager = new FlinkConfigManager(informerManager::setNamespaces);
+        if (!configManager.getOperatorConfiguration().isDynamicNamespacesEnabled()) {
+            informerManager.setNamespaces(
+                    configManager.getOperatorConfiguration().getWatchedNamespaces());
+        }
         Set<FlinkResourceValidator> validators = ValidatorUtils.discoverValidators(configManager);
+
         AdmissionHandler endpoint =
-                new AdmissionHandler(new FlinkValidator(validators, configManager));
+                new AdmissionHandler(
+                        new FlinkValidator(validators, informerManager), new FlinkMutator());
+
         ChannelInitializer<SocketChannel> initializer = createChannelInitializer(endpoint);
         NioEventLoopGroup bossGroup = new NioEventLoopGroup(1);
         NioEventLoopGroup workerGroup = new NioEventLoopGroup();
@@ -118,9 +128,9 @@ public class FlinkOperatorWebhook {
     }
 
     private static SslContext createSslContext() throws Exception {
-        String keystorePath = EnvUtils.get(EnvUtils.ENV_WEBHOOK_KEYSTORE_FILE);
+        var keystorePathOpt = EnvUtils.get(EnvUtils.ENV_WEBHOOK_KEYSTORE_FILE);
 
-        if (StringUtils.isEmpty(keystorePath)) {
+        if (keystorePathOpt.isEmpty()) {
             LOG.info(
                     "No keystore path is defined in "
                             + EnvUtils.ENV_WEBHOOK_KEYSTORE_FILE
@@ -131,7 +141,8 @@ public class FlinkOperatorWebhook {
         String keystorePassword = EnvUtils.getRequired(EnvUtils.ENV_WEBHOOK_KEYSTORE_PASSWORD);
         String keystoreType = EnvUtils.getRequired(EnvUtils.ENV_WEBHOOK_KEYSTORE_TYPE);
         KeyStore keyStore = KeyStore.getInstance(keystoreType);
-        try (InputStream keyStoreFile = Files.newInputStream(new File(keystorePath).toPath())) {
+        try (InputStream keyStoreFile =
+                Files.newInputStream(new File(keystorePathOpt.get()).toPath())) {
             keyStore.load(keyStoreFile, keystorePassword.toCharArray());
         }
         final KeyManagerFactory kmf =

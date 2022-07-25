@@ -40,18 +40,19 @@ public class EventUtilsTest {
         var eventName =
                 EventUtils.generateEventName(
                         flinkApp,
-                        EventUtils.Type.Warning,
+                        EventRecorder.Type.Warning,
                         reason,
                         message,
-                        EventUtils.Component.Operator);
+                        EventRecorder.Component.Operator);
         Assertions.assertTrue(
                 EventUtils.createOrUpdateEvent(
                         kubernetesClient,
                         flinkApp,
-                        EventUtils.Type.Warning,
+                        EventRecorder.Type.Warning,
                         reason,
                         message,
-                        EventUtils.Component.Operator));
+                        EventRecorder.Component.Operator,
+                        e -> {}));
         var event =
                 kubernetesClient
                         .v1()
@@ -67,10 +68,11 @@ public class EventUtilsTest {
                 EventUtils.createOrUpdateEvent(
                         kubernetesClient,
                         flinkApp,
-                        EventUtils.Type.Warning,
+                        EventRecorder.Type.Warning,
                         reason,
                         message,
-                        EventUtils.Component.Operator));
+                        EventRecorder.Component.Operator,
+                        e -> {}));
         event =
                 kubernetesClient
                         .v1()
@@ -80,5 +82,29 @@ public class EventUtilsTest {
                         .get();
 
         Assertions.assertEquals(2, event.getCount());
+    }
+
+    @Test
+    public void testSameResourceNameWithDifferentUidNotShareEvents() {
+        var flinkApp = TestUtils.buildApplicationCluster();
+        flinkApp.getMetadata().setUid("uid1");
+        var reason = "Cleanup";
+        var message = "message";
+        var name1 =
+                EventUtils.generateEventName(
+                        flinkApp,
+                        EventRecorder.Type.Warning,
+                        reason,
+                        message,
+                        EventRecorder.Component.Operator);
+        flinkApp.getMetadata().setUid("uid2");
+        var name2 =
+                EventUtils.generateEventName(
+                        flinkApp,
+                        EventRecorder.Type.Warning,
+                        reason,
+                        message,
+                        EventRecorder.Component.Operator);
+        Assertions.assertNotEquals(name1, name2);
     }
 }

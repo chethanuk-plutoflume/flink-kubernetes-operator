@@ -20,101 +20,64 @@ package org.apache.flink.kubernetes.operator.observer.deployment;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
 import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
-import org.apache.flink.kubernetes.operator.crd.spec.JobState;
 import org.apache.flink.kubernetes.operator.crd.status.FlinkDeploymentStatus;
 import org.apache.flink.kubernetes.operator.crd.status.JobStatus;
 import org.apache.flink.kubernetes.operator.observer.JobStatusObserver;
 import org.apache.flink.kubernetes.operator.observer.SavepointObserver;
 import org.apache.flink.kubernetes.operator.observer.context.ApplicationObserverContext;
 import org.apache.flink.kubernetes.operator.service.FlinkService;
-import org.apache.flink.kubernetes.operator.utils.StatusHelper;
+import org.apache.flink.kubernetes.operator.utils.EventRecorder;
+import org.apache.flink.kubernetes.operator.utils.StatusRecorder;
 import org.apache.flink.runtime.client.JobStatusMessage;
 
-import io.fabric8.kubernetes.client.KubernetesClient;
 import io.javaoperatorsdk.operator.api.reconciler.Context;
 
 import java.util.List;
 import java.util.Optional;
 
-import static org.apache.flink.api.common.JobStatus.FINISHED;
-import static org.apache.flink.api.common.JobStatus.RUNNING;
-
 /** The observer of {@link org.apache.flink.kubernetes.operator.config.Mode#APPLICATION} cluster. */
 public class ApplicationObserver extends AbstractDeploymentObserver {
 
-    private final SavepointObserver savepointObserver;
+    private final SavepointObserver<FlinkDeploymentStatus> savepointObserver;
     private final JobStatusObserver<ApplicationObserverContext> jobStatusObserver;
 
     public ApplicationObserver(
-            KubernetesClient kubernetesClient,
             FlinkService flinkService,
             FlinkConfigManager configManager,
-            StatusHelper<FlinkDeploymentStatus> statusHelper) {
-        super(kubernetesClient, flinkService, configManager);
-        this.savepointObserver = new SavepointObserver(flinkService, configManager, statusHelper);
+            StatusRecorder<FlinkDeploymentStatus> statusRecorder,
+            EventRecorder eventRecorder) {
+        super(flinkService, configManager, eventRecorder);
+        this.savepointObserver =
+                new SavepointObserver(flinkService, configManager, statusRecorder, eventRecorder);
         this.jobStatusObserver =
-                new JobStatusObserver<>(flinkService) {
+                new JobStatusObserver<>(flinkService, eventRecorder) {
                     @Override
                     public void onTimeout(ApplicationObserverContext ctx) {
                         observeJmDeployment(ctx.flinkApp, ctx.context, ctx.deployedConfig);
                     }
 
                     @Override
-                    protected Optional<String> updateJobStatus(
+                    protected Optional<JobStatusMessage> filterTargetJob(
                             JobStatus status, List<JobStatusMessage> clusterJobStatuses) {
-                        clusterJobStatuses.sort(
-                                (j1, j2) -> Long.compare(j2.getStartTime(), j1.getStartTime()));
-                        JobStatusMessage newJob = clusterJobStatuses.get(0);
-
-                        status.setState(newJob.getJobState().name());
-                        status.setJobName(newJob.getJobName());
-                        status.setJobId(newJob.getJobId().toHexString());
-                        status.setStartTime(String.valueOf(newJob.getStartTime()));
-                        status.setUpdateTime(String.valueOf(System.currentTimeMillis()));
-                        return Optional.of(status.getState());
+                        if (!clusterJobStatuses.isEmpty()) {
+                            return Optional.of(clusterJobStatuses.get(0));
+                        }
+                        return Optional.empty();
                     }
                 };
     }
 
     @Override
-    protected boolean observeFlinkCluster(
+    protected void observeFlinkCluster(
             FlinkDeployment flinkApp, Context context, Configuration deployedConfig) {
-
-        var jobStatus = flinkApp.getStatus().getJobStatus();
 
         boolean jobFound =
                 jobStatusObserver.observe(
-                        jobStatus,
+                        flinkApp,
                         deployedConfig,
                         new ApplicationObserverContext(flinkApp, context, deployedConfig));
         if (jobFound) {
             savepointObserver.observeSavepointStatus(flinkApp, deployedConfig);
         }
-        return isJobStable(flinkApp.getStatus());
-    }
-
-    private boolean isJobStable(FlinkDeploymentStatus deploymentStatus) {
-        var flinkJobStatus =
-                org.apache.flink.api.common.JobStatus.valueOf(
-                        deploymentStatus.getJobStatus().getState());
-
-        if (flinkJobStatus == RUNNING) {
-            // Running jobs are currently always marked stable
-            return true;
-        }
-
-        var reconciledJobState =
-                deploymentStatus
-                        .getReconciliationStatus()
-                        .deserializeLastReconciledSpec()
-                        .getJob()
-                        .getState();
-
-        if (reconciledJobState == JobState.RUNNING && flinkJobStatus == FINISHED) {
-            // If the job finished on its own, it's marked stable
-            return true;
-        }
-
-        return false;
     }
 }

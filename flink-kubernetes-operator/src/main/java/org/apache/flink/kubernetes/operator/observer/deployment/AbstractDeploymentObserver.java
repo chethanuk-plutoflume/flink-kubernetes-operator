@@ -32,7 +32,8 @@ import org.apache.flink.kubernetes.operator.exception.DeploymentFailedException;
 import org.apache.flink.kubernetes.operator.observer.Observer;
 import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
 import org.apache.flink.kubernetes.operator.service.FlinkService;
-import org.apache.flink.kubernetes.operator.utils.EventUtils;
+import org.apache.flink.kubernetes.operator.utils.EventRecorder;
+import org.apache.flink.kubernetes.operator.utils.FlinkUtils;
 import org.apache.flink.kubernetes.operator.utils.SavepointUtils;
 
 import io.fabric8.kubernetes.api.model.ContainerStateWaiting;
@@ -43,7 +44,6 @@ import io.fabric8.kubernetes.api.model.apps.Deployment;
 import io.fabric8.kubernetes.api.model.apps.DeploymentCondition;
 import io.fabric8.kubernetes.api.model.apps.DeploymentSpec;
 import io.fabric8.kubernetes.api.model.apps.DeploymentStatus;
-import io.fabric8.kubernetes.client.KubernetesClient;
 import io.javaoperatorsdk.operator.api.reconciler.Context;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -58,30 +58,34 @@ public abstract class AbstractDeploymentObserver implements Observer<FlinkDeploy
 
     protected final Logger logger = LoggerFactory.getLogger(this.getClass());
 
-    protected final KubernetesClient kubernetesClient;
     protected final FlinkService flinkService;
     protected final FlinkConfigManager configManager;
+    protected final EventRecorder eventRecorder;
 
     public AbstractDeploymentObserver(
-            KubernetesClient kubernetesClient,
             FlinkService flinkService,
-            FlinkConfigManager configManager) {
-        this.kubernetesClient = kubernetesClient;
+            FlinkConfigManager configManager,
+            EventRecorder eventRecorder) {
         this.flinkService = flinkService;
         this.configManager = configManager;
+        this.eventRecorder = eventRecorder;
     }
 
     @Override
     public void observe(FlinkDeployment flinkApp, Context context) {
         var status = flinkApp.getStatus();
         var reconciliationStatus = status.getReconciliationStatus();
-        var lastReconciledSpec = reconciliationStatus.deserializeLastReconciledSpec();
 
         // Nothing has been launched so skip observing
-        if (lastReconciledSpec == null
-                || reconciliationStatus.getState() == ReconciliationState.ROLLING_BACK
-                || reconciliationStatus.getState() == ReconciliationState.UPGRADING) {
+        if (reconciliationStatus.getState() == ReconciliationState.ROLLING_BACK) {
             return;
+        }
+
+        if (reconciliationStatus.getState() == ReconciliationState.UPGRADING) {
+            checkIfAlreadyUpgraded(flinkApp, context);
+            if (reconciliationStatus.getState() == ReconciliationState.UPGRADING) {
+                return;
+            }
         }
 
         Configuration observeConfig = configManager.getObserveConfig(flinkApp);
@@ -90,18 +94,14 @@ public abstract class AbstractDeploymentObserver implements Observer<FlinkDeploy
         }
 
         if (isJmDeploymentReady(flinkApp)) {
-            if (observeFlinkCluster(flinkApp, context, observeConfig)) {
-                if (reconciliationStatus.getState() != ReconciliationState.ROLLED_BACK) {
-                    reconciliationStatus.markReconciledSpecAsStable();
-                }
-            }
+            observeFlinkCluster(flinkApp, context, observeConfig);
         }
 
         if (isJmDeploymentReady(flinkApp)) {
             observeClusterInfo(flinkApp, observeConfig);
         }
 
-        SavepointUtils.resetTriggerIfJobNotRunning(flinkService.getKubernetesClient(), flinkApp);
+        SavepointUtils.resetTriggerIfJobNotRunning(flinkApp, eventRecorder);
         clearErrorsIfDeploymentIsHealthy(flinkApp);
     }
 
@@ -217,8 +217,9 @@ public abstract class AbstractDeploymentObserver implements Observer<FlinkDeploy
         FlinkDeploymentStatus status = dep.getStatus();
         ReconciliationStatus reconciliationStatus = status.getReconciliationStatus();
         if (status.getJobManagerDeploymentStatus() != JobManagerDeploymentStatus.ERROR
+                && !JobStatus.FAILED.name().equals(dep.getStatus().getJobStatus().getState())
                 && reconciliationStatus.isLastReconciledSpecStable()) {
-            status.setError(null);
+            status.setError("");
         }
     }
 
@@ -243,13 +244,60 @@ public abstract class AbstractDeploymentObserver implements Observer<FlinkDeploy
         String err = "Missing JobManager deployment";
         logger.error(err);
         ReconciliationUtils.updateForReconciliationError(deployment, err);
-        EventUtils.createOrUpdateEvent(
-                kubernetesClient,
+        eventRecorder.triggerEvent(
                 deployment,
-                EventUtils.Type.Warning,
-                "Missing",
-                err,
-                EventUtils.Component.JobManagerDeployment);
+                EventRecorder.Type.Warning,
+                EventRecorder.Reason.Missing,
+                EventRecorder.Component.JobManagerDeployment,
+                err);
+    }
+
+    /**
+     * Checks a deployment that is currently in the UPGRADING state whether it was already deployed
+     * but we simply miss the status information. After comparing the target resource generation
+     * with the one from the possible deployment if they match we update the status to the already
+     * DEPLOYED state.
+     *
+     * @param flinkDep Flink resource to check.
+     * @param context Context for reconciliation.
+     */
+    private void checkIfAlreadyUpgraded(FlinkDeployment flinkDep, Context context) {
+        var status = flinkDep.getStatus();
+        if (status.getReconciliationStatus().isFirstDeployment()) {
+            return;
+        }
+        Optional<Deployment> depOpt = context.getSecondaryResource(Deployment.class);
+        depOpt.ifPresent(
+                deployment -> {
+                    Map<String, String> annotations = deployment.getMetadata().getAnnotations();
+                    if (annotations == null) {
+                        return;
+                    }
+                    Long deployedGeneration =
+                            Optional.ofNullable(annotations.get(FlinkUtils.CR_GENERATION_LABEL))
+                                    .map(Long::valueOf)
+                                    .orElse(-1L);
+
+                    Long upgradeTargetGeneration =
+                            ReconciliationUtils.getUpgradeTargetGeneration(flinkDep);
+
+                    if (deployedGeneration.equals(upgradeTargetGeneration)) {
+                        logger.info("Pending upgrade is already deployed, updating status.");
+                        ReconciliationUtils.updateStatusForAlreadyUpgraded(flinkDep);
+                        if (flinkDep.getSpec().getJob() != null) {
+                            status.getJobStatus()
+                                    .setState(
+                                            org.apache.flink.api.common.JobStatus.RECONCILING
+                                                    .name());
+                        }
+                        status.setJobManagerDeploymentStatus(JobManagerDeploymentStatus.DEPLOYING);
+                    } else {
+                        logger.warn(
+                                "Running deployment generation {} doesn't match upgrade target generation {}.",
+                                deployedGeneration,
+                                upgradeTargetGeneration);
+                    }
+                });
     }
 
     /**
@@ -259,8 +307,7 @@ public abstract class AbstractDeploymentObserver implements Observer<FlinkDeploy
      * @param flinkApp the target flinkDeployment resource
      * @param context the context with which the operation is executed
      * @param deployedConfig config that is deployed on the Flink cluster
-     * @return true if cluster state is stable
      */
-    protected abstract boolean observeFlinkCluster(
+    protected abstract void observeFlinkCluster(
             FlinkDeployment flinkApp, Context context, Configuration deployedConfig);
 }

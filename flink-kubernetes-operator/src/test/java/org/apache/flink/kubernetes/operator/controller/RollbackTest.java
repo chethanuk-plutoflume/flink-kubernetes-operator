@@ -58,16 +58,16 @@ public class RollbackTest {
     private TestingFlinkService flinkService;
     private Context context;
 
-    private FlinkDeploymentController testController;
+    private TestingFlinkDeploymentController testController;
 
     private KubernetesClient kubernetesClient;
 
     @BeforeEach
     public void setup() {
-        flinkService = new TestingFlinkService();
+        flinkService = new TestingFlinkService(kubernetesClient);
         context = flinkService.getContext();
         testController =
-                TestUtils.createTestController(
+                new TestingFlinkDeploymentController(
                         new FlinkConfigManager(new Configuration()),
                         kubernetesClient,
                         flinkService);
@@ -315,7 +315,7 @@ public class RollbackTest {
         assertEquals(
                 ReconciliationState.DEPLOYED,
                 deployment.getStatus().getReconciliationStatus().getState());
-        assertNull(deployment.getStatus().getError());
+        assertEquals("", deployment.getStatus().getError());
 
         deployment.getSpec().setRestartNonce(456L);
         triggerRollback.run();
@@ -347,7 +347,7 @@ public class RollbackTest {
             assertEquals(
                     ReconciliationState.DEPLOYED,
                     deployment.getStatus().getReconciliationStatus().getState());
-            assertNull(deployment.getStatus().getError());
+            assertEquals("", deployment.getStatus().getError());
 
             deployment.getSpec().getJob().setState(JobState.RUNNING);
             testController.reconcile(deployment, context);
@@ -360,7 +360,7 @@ public class RollbackTest {
             assertEquals(
                     ReconciliationState.DEPLOYED,
                     deployment.getStatus().getReconciliationStatus().getState());
-            assertNull(deployment.getStatus().getError());
+            assertEquals("", deployment.getStatus().getError());
 
             // Verify suspending a rolled back job
             triggerRollback.run();
@@ -378,7 +378,7 @@ public class RollbackTest {
             assertEquals(
                     ReconciliationState.DEPLOYED,
                     deployment.getStatus().getReconciliationStatus().getState());
-            assertNull(deployment.getStatus().getError());
+            assertEquals("", deployment.getStatus().getError());
         }
     }
 }
