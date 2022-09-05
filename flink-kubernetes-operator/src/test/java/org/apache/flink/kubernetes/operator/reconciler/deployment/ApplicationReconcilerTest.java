@@ -19,7 +19,10 @@ package org.apache.flink.kubernetes.operator.reconciler.deployment;
 
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.CoreOptions;
 import org.apache.flink.configuration.HighAvailabilityOptions;
+import org.apache.flink.configuration.JobManagerOptions;
+import org.apache.flink.configuration.SchedulerExecutionMode;
 import org.apache.flink.kubernetes.operator.TestUtils;
 import org.apache.flink.kubernetes.operator.TestingFlinkService;
 import org.apache.flink.kubernetes.operator.TestingStatusRecorder;
@@ -29,6 +32,7 @@ import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.crd.spec.FlinkDeploymentSpec;
 import org.apache.flink.kubernetes.operator.crd.spec.FlinkVersion;
 import org.apache.flink.kubernetes.operator.crd.spec.JobState;
+import org.apache.flink.kubernetes.operator.crd.spec.KubernetesDeploymentMode;
 import org.apache.flink.kubernetes.operator.crd.spec.UpgradeMode;
 import org.apache.flink.kubernetes.operator.crd.status.FlinkDeploymentStatus;
 import org.apache.flink.kubernetes.operator.crd.status.JobManagerDeploymentStatus;
@@ -57,11 +61,11 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /** @link JobStatusObserver unit tests */
@@ -70,14 +74,17 @@ public class ApplicationReconcilerTest {
 
     private KubernetesClient kubernetesClient;
     private final FlinkConfigManager configManager = new FlinkConfigManager(new Configuration());
-    private TestingFlinkService flinkService = new TestingFlinkService();
+    private TestingFlinkService flinkService;
     private ApplicationReconciler reconciler;
+    private Context<FlinkDeployment> context;
 
     @BeforeEach
     public void before() {
         kubernetesClient.resource(TestUtils.buildApplicationCluster()).createOrReplace();
         var eventRecorder = new EventRecorder(kubernetesClient, (r, e) -> {});
-        var statusRecoder = new TestingStatusRecorder<FlinkDeploymentStatus>();
+        var statusRecoder = new TestingStatusRecorder<FlinkDeployment, FlinkDeploymentStatus>();
+        flinkService = new TestingFlinkService(kubernetesClient);
+        context = flinkService.getContext();
         reconciler =
                 new ApplicationReconciler(
                         kubernetesClient,
@@ -90,8 +97,6 @@ public class ApplicationReconcilerTest {
     @ParameterizedTest
     @EnumSource(FlinkVersion.class)
     public void testUpgrade(FlinkVersion flinkVersion) throws Exception {
-        Context context = flinkService.getContext();
-
         FlinkDeployment deployment = TestUtils.buildApplicationCluster(flinkVersion);
 
         reconciler.reconcile(deployment, context);
@@ -104,7 +109,6 @@ public class ApplicationReconcilerTest {
         statelessUpgrade.getSpec().getFlinkConfiguration().put("new", "conf");
         reconciler.reconcile(statelessUpgrade, context);
 
-        runningJobs = flinkService.listJobs();
         assertEquals(0, flinkService.getRunningCount());
 
         reconciler.reconcile(statelessUpgrade, context);
@@ -125,7 +129,6 @@ public class ApplicationReconcilerTest {
 
         reconciler.reconcile(statefulUpgrade, context);
 
-        runningJobs = flinkService.listJobs();
         assertEquals(0, flinkService.getRunningCount());
 
         reconciler.reconcile(statefulUpgrade, context);
@@ -144,6 +147,11 @@ public class ApplicationReconcilerTest {
 
         deployment.getSpec().getJob().setUpgradeMode(UpgradeMode.LAST_STATE);
         deployment.getSpec().setRestartNonce(100L);
+        deployment
+                .getStatus()
+                .getReconciliationStatus()
+                .setLastStableSpec(
+                        deployment.getStatus().getReconciliationStatus().getLastReconciledSpec());
         flinkService.setHaDataAvailable(false);
         deployment.getStatus().getJobStatus().setState("RECONCILING");
 
@@ -181,11 +189,42 @@ public class ApplicationReconcilerTest {
         assertEquals("finished_sp", runningJobs.get(0).f0);
     }
 
+    @ParameterizedTest
+    @EnumSource(UpgradeMode.class)
+    public void testUpgradeBeforeReachingStableSpec(UpgradeMode upgradeMode) throws Exception {
+        flinkService.setHaDataAvailable(false);
+
+        final FlinkDeployment deployment = TestUtils.buildApplicationCluster();
+
+        reconciler.reconcile(deployment, context);
+        assertEquals(
+                JobManagerDeploymentStatus.DEPLOYING,
+                deployment.getStatus().getJobManagerDeploymentStatus());
+
+        // Ready for spec changes, the reconciliation should be performed
+        final String newImage = "new-image-1";
+        deployment.getSpec().getJob().setUpgradeMode(upgradeMode);
+        deployment.getSpec().setImage(newImage);
+        reconciler.reconcile(deployment, context);
+        if (!UpgradeMode.STATELESS.equals(upgradeMode)) {
+            assertNull(deployment.getStatus().getReconciliationStatus().getLastReconciledSpec());
+            assertEquals(
+                    ReconciliationState.UPGRADING,
+                    deployment.getStatus().getReconciliationStatus().getState());
+            reconciler.reconcile(deployment, context);
+        }
+        assertEquals(
+                newImage,
+                deployment
+                        .getStatus()
+                        .getReconciliationStatus()
+                        .deserializeLastReconciledSpec()
+                        .getImage());
+    }
+
     @Test
     public void testUpgradeModeChangeFromSavepointToLastState() throws Exception {
         final String expectedSavepointPath = "savepoint_0";
-        Context context = flinkService.getContext();
-
         final FlinkDeployment deployment = TestUtils.buildApplicationCluster();
 
         reconciler.reconcile(deployment, context);
@@ -224,7 +263,6 @@ public class ApplicationReconcilerTest {
 
     @Test
     public void triggerSavepoint() throws Exception {
-        Context context = flinkService.getContext();
         FlinkDeployment deployment = TestUtils.buildApplicationCluster();
 
         reconciler.reconcile(deployment, context);
@@ -314,7 +352,6 @@ public class ApplicationReconcilerTest {
     public void testUpgradeModeChangedToLastStateShouldTriggerSavepointWhileHADisabled()
             throws Exception {
         flinkService.setHaDataAvailable(false);
-        Context context = flinkService.getContext();
 
         final FlinkDeployment deployment = TestUtils.buildApplicationCluster();
         deployment.getSpec().getFlinkConfiguration().remove(HighAvailabilityOptions.HA_MODE.key());
@@ -359,8 +396,6 @@ public class ApplicationReconcilerTest {
     @Test
     public void testUpgradeModeChangedToLastStateShouldNotTriggerSavepointWhileHAEnabled()
             throws Exception {
-        Context context = flinkService.getContext();
-
         final FlinkDeployment deployment = TestUtils.buildApplicationCluster();
 
         reconciler.reconcile(deployment, context);
@@ -393,8 +428,6 @@ public class ApplicationReconcilerTest {
 
     @Test
     public void triggerRestart() throws Exception {
-        Context context = flinkService.getContext();
-
         FlinkDeployment deployment = TestUtils.buildApplicationCluster();
 
         reconciler.reconcile(deployment, context);
@@ -452,7 +485,6 @@ public class ApplicationReconcilerTest {
 
     @Test
     public void testJobUpgradeIgnorePendingSavepoint() throws Exception {
-        Context context = flinkService.getContext();
         FlinkDeployment deployment = TestUtils.buildApplicationCluster();
         reconciler.reconcile(deployment, context);
         List<Tuple2<String, JobStatusMessage>> runningJobs = flinkService.listJobs();
@@ -476,6 +508,7 @@ public class ApplicationReconcilerTest {
                 .put(
                         KubernetesOperatorConfigOptions.JOB_UPGRADE_IGNORE_PENDING_SAVEPOINT.key(),
                         "true");
+        spDeployment.getSpec().setImage("flink:greatest");
         reconciler.reconcile(spDeployment, context);
         assertEquals(
                 "trigger_0",
@@ -488,8 +521,6 @@ public class ApplicationReconcilerTest {
     @Test
     public void testRandomJobResultStorePath() throws Exception {
         FlinkDeployment flinkApp = TestUtils.buildApplicationCluster();
-        Context context = flinkService.getContext();
-
         final String haStoragePath = "file:///flink-data/ha";
         flinkApp.getSpec()
                 .getFlinkConfiguration()
@@ -520,15 +551,14 @@ public class ApplicationReconcilerTest {
         var deployment = TestUtils.buildApplicationCluster(FlinkVersion.v1_14);
         deployment.getSpec().getJob().setUpgradeMode(UpgradeMode.LAST_STATE);
 
-        var ctx = flinkService.getContext();
-        reconciler.reconcile(deployment, ctx);
+        reconciler.reconcile(deployment, context);
 
         deployment.getSpec().setFlinkVersion(FlinkVersion.v1_15);
 
         var reconStatus = deployment.getStatus().getReconciliationStatus();
 
         // Do not trigger update until running
-        reconciler.reconcile(deployment, ctx);
+        reconciler.reconcile(deployment, context);
         assertEquals(ReconciliationState.DEPLOYED, reconStatus.getState());
 
         deployment.getStatus().getJobStatus().setState(JobState.RUNNING.name());
@@ -537,10 +567,83 @@ public class ApplicationReconcilerTest {
                 .getJobStatus()
                 .setJobId(flinkService.listJobs().get(0).f1.getJobId().toHexString());
 
-        reconciler.reconcile(deployment, ctx);
+        reconciler.reconcile(deployment, context);
         assertEquals(ReconciliationState.UPGRADING, reconStatus.getState());
         assertEquals(
                 UpgradeMode.SAVEPOINT,
                 reconStatus.deserializeLastReconciledSpec().getJob().getUpgradeMode());
+    }
+
+    @Test
+    public void testScaleWithReactiveModeDisabled() throws Exception {
+        FlinkDeployment deployment = TestUtils.buildApplicationCluster();
+
+        reconciler.reconcile(deployment, context);
+        verifyAndSetRunningJobsToStatus(deployment, flinkService.listJobs());
+        deployment.getSpec().getJob().setParallelism(100);
+        reconciler.reconcile(deployment, context);
+        assertEquals(
+                JobState.SUSPENDED,
+                deployment
+                        .getStatus()
+                        .getReconciliationStatus()
+                        .deserializeLastReconciledSpec()
+                        .getJob()
+                        .getState());
+    }
+
+    @Test
+    public void testScaleWithReactiveModeEnabled() throws Exception {
+        FlinkDeployment deployment = TestUtils.buildApplicationCluster();
+        deployment.getSpec().setMode(KubernetesDeploymentMode.STANDALONE);
+        deployment
+                .getSpec()
+                .getFlinkConfiguration()
+                .put(
+                        JobManagerOptions.SCHEDULER_MODE.key(),
+                        SchedulerExecutionMode.REACTIVE.name());
+
+        reconciler.reconcile(deployment, context);
+        verifyAndSetRunningJobsToStatus(deployment, flinkService.listJobs());
+
+        // the default.parallelism is always ignored
+        deployment
+                .getSpec()
+                .getFlinkConfiguration()
+                .put(CoreOptions.DEFAULT_PARALLELISM.key(), "100");
+        reconciler.reconcile(deployment, context);
+        assertEquals(
+                JobState.RUNNING,
+                deployment
+                        .getStatus()
+                        .getReconciliationStatus()
+                        .deserializeLastReconciledSpec()
+                        .getJob()
+                        .getState());
+        assertEquals(0, flinkService.getDesiredReplicas());
+
+        deployment.getSpec().getJob().setParallelism(4);
+        reconciler.reconcile(deployment, context);
+        assertEquals(
+                JobState.RUNNING,
+                deployment
+                        .getStatus()
+                        .getReconciliationStatus()
+                        .deserializeLastReconciledSpec()
+                        .getJob()
+                        .getState());
+        assertEquals(2, flinkService.getDesiredReplicas());
+
+        deployment.getSpec().getJob().setParallelism(8);
+        reconciler.reconcile(deployment, context);
+        assertEquals(
+                JobState.RUNNING,
+                deployment
+                        .getStatus()
+                        .getReconciliationStatus()
+                        .deserializeLastReconciledSpec()
+                        .getJob()
+                        .getState());
+        assertEquals(4, flinkService.getDesiredReplicas());
     }
 }

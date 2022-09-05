@@ -27,6 +27,7 @@ import org.apache.flink.kubernetes.operator.crd.spec.FlinkDeploymentSpec;
 import org.apache.flink.kubernetes.operator.crd.spec.UpgradeMode;
 import org.apache.flink.kubernetes.operator.crd.status.FlinkDeploymentStatus;
 import org.apache.flink.kubernetes.operator.crd.status.JobManagerDeploymentStatus;
+import org.apache.flink.kubernetes.operator.crd.status.ReconciliationState;
 import org.apache.flink.kubernetes.operator.exception.DeploymentFailedException;
 import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
 import org.apache.flink.kubernetes.operator.service.FlinkService;
@@ -60,24 +61,24 @@ public class ApplicationReconciler
             FlinkService flinkService,
             FlinkConfigManager configManager,
             EventRecorder eventRecorder,
-            StatusRecorder<FlinkDeploymentStatus> statusRecorder) {
+            StatusRecorder<FlinkDeployment, FlinkDeploymentStatus> statusRecorder) {
         super(kubernetesClient, configManager, eventRecorder, statusRecorder);
         this.flinkService = flinkService;
     }
 
     @Override
-    protected FlinkService getFlinkService(FlinkDeployment resource, Context context) {
+    protected FlinkService getFlinkService(FlinkDeployment resource, Context<?> context) {
         return flinkService;
     }
 
     @Override
-    protected Configuration getObserveConfig(FlinkDeployment deployment, Context context) {
+    protected Configuration getObserveConfig(FlinkDeployment deployment, Context<?> context) {
         return configManager.getObserveConfig(deployment);
     }
 
     @Override
     protected Configuration getDeployConfig(
-            ObjectMeta deployMeta, FlinkDeploymentSpec currentDeploySpec, Context context) {
+            ObjectMeta deployMeta, FlinkDeploymentSpec currentDeploySpec, Context<?> context) {
         return configManager.getDeployConfig(deployMeta, currentDeploySpec);
     }
 
@@ -98,12 +99,19 @@ public class ApplicationReconciler
                                 .OPERATOR_JOB_UPGRADE_LAST_STATE_FALLBACK_ENABLED)
                 && FlinkUtils.isKubernetesHAActivated(deployConfig)
                 && FlinkUtils.isKubernetesHAActivated(observeConfig)
-                && flinkService.isHaMetadataAvailable(deployConfig)
                 && !flinkVersionChanged(
                         ReconciliationUtils.getDeployedSpec(deployment), deployment.getSpec())) {
-            LOG.info(
-                    "Job is not running but HA metadata is available for last state restore, ready for upgrade");
-            return Optional.of(UpgradeMode.LAST_STATE);
+
+            if (!flinkService.isHaMetadataAvailable(deployConfig)) {
+                if (deployment.getStatus().getReconciliationStatus().getLastStableSpec() == null) {
+                    // initial deployment failure, reset to allow for spec change to proceed
+                    return resetOnMissingStableSpec(deployment, deployConfig);
+                }
+            } else {
+                LOG.info(
+                        "Job is not running but HA metadata is available for last state restore, ready for upgrade");
+                return Optional.of(UpgradeMode.LAST_STATE);
+            }
         }
 
         if (status.getJobManagerDeploymentStatus() == JobManagerDeploymentStatus.MISSING
@@ -120,12 +128,37 @@ public class ApplicationReconciler
         return Optional.empty();
     }
 
+    private Optional<UpgradeMode> resetOnMissingStableSpec(
+            FlinkDeployment deployment, Configuration deployConfig) {
+        // initial deployment failure, reset to allow for spec change to proceed
+        flinkService.deleteClusterDeployment(
+                deployment.getMetadata(), deployment.getStatus(), false);
+        flinkService.waitForClusterShutdown(deployConfig);
+        if (!flinkService.isHaMetadataAvailable(deployConfig)) {
+            LOG.info(
+                    "Job never entered stable state. Clearing previous spec to reset for initial deploy");
+            // TODO: lastSpecWithMeta.f1.isFirstDeployment() is false
+            // ReconciliationUtils.clearLastReconciledSpecIfFirstDeploy(deployment);
+            deployment.getStatus().getReconciliationStatus().setLastReconciledSpec(null);
+            // UPGRADING triggers immediate reconciliation
+            deployment
+                    .getStatus()
+                    .getReconciliationStatus()
+                    .setState(ReconciliationState.UPGRADING);
+            return Optional.empty();
+        } else {
+            // proceed with upgrade if deployment succeeded between check and delete
+            LOG.info("Found HA state after deployment deletion, falling back to stateful upgrade");
+            return Optional.of(UpgradeMode.LAST_STATE);
+        }
+    }
+
     @Override
     protected void deploy(
             FlinkDeployment relatedResource,
             FlinkDeploymentSpec spec,
             FlinkDeploymentStatus status,
-            Context ctx,
+            Context<?> ctx,
             Configuration deployConfig,
             Optional<String> savepoint,
             boolean requireHaMetadata)
@@ -165,7 +198,7 @@ public class ApplicationReconciler
     @Override
     protected void cancelJob(
             FlinkDeployment deployment,
-            Context ctx,
+            Context<?> ctx,
             UpgradeMode upgradeMode,
             Configuration observeConfig)
             throws Exception {
@@ -192,7 +225,8 @@ public class ApplicationReconciler
 
     @Override
     public boolean reconcileOtherChanges(
-            FlinkDeployment deployment, Context ctx, Configuration observeConfig) throws Exception {
+            FlinkDeployment deployment, Context<?> ctx, Configuration observeConfig)
+            throws Exception {
         if (super.reconcileOtherChanges(deployment, ctx, observeConfig)) {
             return true;
         }
@@ -205,7 +239,8 @@ public class ApplicationReconciler
     }
 
     private void recoverJmDeployment(
-            FlinkDeployment deployment, Context ctx, Configuration observeConfig) throws Exception {
+            FlinkDeployment deployment, Context<?> ctx, Configuration observeConfig)
+            throws Exception {
         LOG.info("Missing Flink Cluster deployment, trying to recover...");
         FlinkDeploymentSpec specToRecover = ReconciliationUtils.getDeployedSpec(deployment);
         restoreJob(deployment, specToRecover, deployment.getStatus(), ctx, observeConfig, true);
@@ -213,7 +248,7 @@ public class ApplicationReconciler
 
     @Override
     @SneakyThrows
-    protected DeleteControl cleanupInternal(FlinkDeployment deployment, Context context) {
+    protected DeleteControl cleanupInternal(FlinkDeployment deployment, Context<?> context) {
         var status = deployment.getStatus();
         if (status.getReconciliationStatus().isFirstDeployment()) {
             flinkService.deleteClusterDeployment(deployment.getMetadata(), status, true);

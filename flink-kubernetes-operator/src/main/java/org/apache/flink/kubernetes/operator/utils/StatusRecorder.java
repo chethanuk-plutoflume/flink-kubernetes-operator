@@ -35,12 +35,14 @@ import lombok.SneakyThrows;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Instant;
 import java.util.Collection;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiConsumer;
 
 /** Helper class for status management and updates. */
-public class StatusRecorder<STATUS extends CommonStatus<?>> {
+public class StatusRecorder<
+        CR extends AbstractFlinkResource<?, STATUS>, STATUS extends CommonStatus<?>> {
 
     private static final Logger LOG = LoggerFactory.getLogger(StatusRecorder.class);
 
@@ -50,13 +52,13 @@ public class StatusRecorder<STATUS extends CommonStatus<?>> {
             new ConcurrentHashMap<>();
 
     private final KubernetesClient client;
-    private final MetricManager<AbstractFlinkResource<?, STATUS>> metricManager;
-    private final BiConsumer<AbstractFlinkResource<?, STATUS>, STATUS> statusUpdateListener;
+    private final MetricManager<CR> metricManager;
+    private final BiConsumer<CR, STATUS> statusUpdateListener;
 
     public StatusRecorder(
             KubernetesClient client,
-            MetricManager<AbstractFlinkResource<?, STATUS>> metricManager,
-            BiConsumer<AbstractFlinkResource<?, STATUS>, STATUS> statusUpdateListener) {
+            MetricManager<CR> metricManager,
+            BiConsumer<CR, STATUS> statusUpdateListener) {
         this.client = client;
         this.statusUpdateListener = statusUpdateListener;
         this.metricManager = metricManager;
@@ -69,11 +71,10 @@ public class StatusRecorder<STATUS extends CommonStatus<?>> {
      * operator behavior.
      *
      * @param resource Resource for which status update should be performed
-     * @param <T> Resource type.
      */
     @SneakyThrows
-    public <T extends AbstractFlinkResource<?, STATUS>> void patchAndCacheStatus(T resource) {
-        Class<T> resourceClass = (Class<T>) resource.getClass();
+    public void patchAndCacheStatus(CR resource) {
+        Class<CR> resourceClass = (Class<CR>) resource.getClass();
         String namespace = resource.getMetadata().getNamespace();
         String name = resource.getMetadata().getName();
 
@@ -126,9 +127,8 @@ public class StatusRecorder<STATUS extends CommonStatus<?>> {
      * reconciles a resource for the first time after a restart.
      *
      * @param resource Resource for which the status should be updated from the cache
-     * @param <T> Custom resource type.
      */
-    public <T extends AbstractFlinkResource<?, STATUS>> void updateStatusFromCache(T resource) {
+    public void updateStatusFromCache(CR resource) {
         var key = getKey(resource);
         var cachedStatus = statusCache.get(key);
         if (cachedStatus != null) {
@@ -147,9 +147,8 @@ public class StatusRecorder<STATUS extends CommonStatus<?>> {
      * Remove cached status for Flink resource.
      *
      * @param resource Flink resource.
-     * @param <T> Resource type.
      */
-    public <T extends AbstractFlinkResource<?, STATUS>> void removeCachedStatus(T resource) {
+    public void removeCachedStatus(CR resource) {
         statusCache.remove(getKey(resource));
         metricManager.onRemove(resource);
     }
@@ -158,12 +157,14 @@ public class StatusRecorder<STATUS extends CommonStatus<?>> {
         return Tuple2.of(resource.getMetadata().getNamespace(), resource.getMetadata().getName());
     }
 
-    public static <S extends CommonStatus<?>> StatusRecorder<S> create(
-            KubernetesClient kubernetesClient,
-            MetricManager<AbstractFlinkResource<?, S>> metricManager,
-            Collection<FlinkResourceListener> listeners) {
-        BiConsumer<AbstractFlinkResource<?, S>, S> consumer =
+    public static <S extends CommonStatus<?>, CR extends AbstractFlinkResource<?, S>>
+            StatusRecorder<CR, S> create(
+                    KubernetesClient kubernetesClient,
+                    MetricManager<CR> metricManager,
+                    Collection<FlinkResourceListener> listeners) {
+        BiConsumer<CR, S> consumer =
                 (resource, previousStatus) -> {
+                    var now = Instant.now();
                     var ctx =
                             new FlinkResourceListener.StatusUpdateContext() {
                                 @Override
@@ -180,6 +181,11 @@ public class StatusRecorder<STATUS extends CommonStatus<?>> {
                                 public KubernetesClient getKubernetesClient() {
                                     return kubernetesClient;
                                 }
+
+                                @Override
+                                public Instant getTimestamp() {
+                                    return now;
+                                }
                             };
 
                     listeners.forEach(
@@ -191,6 +197,7 @@ public class StatusRecorder<STATUS extends CommonStatus<?>> {
                                 }
                             });
                 };
+
         return new StatusRecorder<>(kubernetesClient, metricManager, consumer);
     }
 }

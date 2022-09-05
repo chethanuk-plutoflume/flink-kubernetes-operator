@@ -25,8 +25,7 @@ import org.apache.flink.core.plugin.PluginUtils;
 import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
 import org.apache.flink.kubernetes.operator.controller.FlinkDeploymentController;
 import org.apache.flink.kubernetes.operator.controller.FlinkSessionJobController;
-import org.apache.flink.kubernetes.operator.crd.status.FlinkDeploymentStatus;
-import org.apache.flink.kubernetes.operator.crd.status.FlinkSessionJobStatus;
+import org.apache.flink.kubernetes.operator.health.OperatorHealthService;
 import org.apache.flink.kubernetes.operator.listener.FlinkResourceListener;
 import org.apache.flink.kubernetes.operator.listener.ListenerUtils;
 import org.apache.flink.kubernetes.operator.metrics.KubernetesOperatorMetricGroup;
@@ -71,17 +70,19 @@ public class FlinkOperator {
     private final FlinkServiceFactory flinkServiceFactory;
     private final FlinkConfigManager configManager;
     private final Set<FlinkResourceValidator> validators;
-    @VisibleForTesting final Set<RegisteredController> registeredControllers = new HashSet<>();
+    @VisibleForTesting final Set<RegisteredController<?>> registeredControllers = new HashSet<>();
     private final KubernetesOperatorMetricGroup metricGroup;
     private final Collection<FlinkResourceListener> listeners;
+    private final OperatorHealthService operatorHealthService;
 
     public FlinkOperator(@Nullable Configuration conf) {
         this.configManager =
                 conf != null
                         ? new FlinkConfigManager(conf) // For testing only
                         : new FlinkConfigManager(this::handleNamespaceChanges);
-        this.metricGroup =
-                OperatorMetricUtils.initOperatorMetrics(configManager.getDefaultConfig());
+
+        var defaultConfig = configManager.getDefaultConfig();
+        this.metricGroup = OperatorMetricUtils.initOperatorMetrics(defaultConfig);
         this.client =
                 KubernetesClientUtils.getKubernetesClient(
                         configManager.getOperatorConfiguration(), this.metricGroup);
@@ -89,9 +90,9 @@ public class FlinkOperator {
         this.flinkServiceFactory = new FlinkServiceFactory(client, configManager);
         this.validators = ValidatorUtils.discoverValidators(configManager);
         this.listeners = ListenerUtils.discoverListeners(configManager);
-        PluginManager pluginManager =
-                PluginUtils.createPluginManagerFromRootFolder(configManager.getDefaultConfig());
-        FileSystem.initialize(configManager.getDefaultConfig(), pluginManager);
+        PluginManager pluginManager = PluginUtils.createPluginManagerFromRootFolder(defaultConfig);
+        FileSystem.initialize(defaultConfig, pluginManager);
+        this.operatorHealthService = OperatorHealthService.fromConfig(configManager);
     }
 
     private void handleNamespaceChanges(Set<String> namespaces) {
@@ -120,9 +121,9 @@ public class FlinkOperator {
 
     @VisibleForTesting
     void registerDeploymentController() {
-        var statusRecorder =
-                StatusRecorder.<FlinkDeploymentStatus>create(
-                        client, new MetricManager<>(metricGroup, configManager), listeners);
+        var metricManager =
+                MetricManager.createFlinkDeploymentMetricManager(configManager, metricGroup);
+        var statusRecorder = StatusRecorder.create(client, metricManager, listeners);
         var eventRecorder = EventRecorder.create(client, listeners);
         var reconcilerFactory =
                 new ReconcilerFactory(
@@ -145,18 +146,21 @@ public class FlinkOperator {
     @VisibleForTesting
     void registerSessionJobController() {
         var eventRecorder = EventRecorder.create(client, listeners);
-        var statusRecorder =
-                StatusRecorder.<FlinkSessionJobStatus>create(
-                        client, new MetricManager<>(metricGroup, configManager), listeners);
+        var metricManager =
+                MetricManager.createFlinkSessionJobMetricManager(configManager, metricGroup);
+        var statusRecorder = StatusRecorder.create(client, metricManager, listeners);
         var reconciler =
                 new SessionJobReconciler(
                         client, flinkServiceFactory, configManager, eventRecorder, statusRecorder);
-        var observer =
-                new SessionJobObserver(
-                        flinkServiceFactory, configManager, statusRecorder, eventRecorder);
+        var observer = new SessionJobObserver(flinkServiceFactory, configManager, eventRecorder);
         var controller =
                 new FlinkSessionJobController(
-                        configManager, validators, reconciler, observer, statusRecorder);
+                        configManager,
+                        validators,
+                        reconciler,
+                        observer,
+                        statusRecorder,
+                        eventRecorder);
         registeredControllers.add(operator.register(controller, this::overrideControllerConfigs));
     }
 
@@ -182,6 +186,10 @@ public class FlinkOperator {
         registerSessionJobController();
         operator.installShutdownHook();
         operator.start();
+        if (operatorHealthService != null) {
+            Runtime.getRuntime().addShutdownHook(new Thread(operatorHealthService::stop));
+            operatorHealthService.start();
+        }
     }
 
     public static void main(String... args) {

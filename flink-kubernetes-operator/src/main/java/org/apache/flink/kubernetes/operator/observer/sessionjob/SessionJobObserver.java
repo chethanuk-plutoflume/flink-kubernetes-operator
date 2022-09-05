@@ -35,7 +35,6 @@ import org.apache.flink.kubernetes.operator.service.FlinkService;
 import org.apache.flink.kubernetes.operator.service.FlinkServiceFactory;
 import org.apache.flink.kubernetes.operator.utils.EventRecorder;
 import org.apache.flink.kubernetes.operator.utils.SavepointUtils;
-import org.apache.flink.kubernetes.operator.utils.StatusRecorder;
 import org.apache.flink.runtime.client.JobStatusMessage;
 import org.apache.flink.util.Preconditions;
 
@@ -56,17 +55,14 @@ public class SessionJobObserver implements Observer<FlinkSessionJob> {
     private final FlinkServiceFactory flinkServiceFactory;
     private final FlinkConfigManager configManager;
     private final EventRecorder eventRecorder;
-    private final StatusRecorder<FlinkSessionJobStatus> statusRecorder;
 
     public SessionJobObserver(
             FlinkServiceFactory flinkServiceFactory,
             FlinkConfigManager configManager,
-            StatusRecorder<FlinkSessionJobStatus> statusRecorder,
             EventRecorder eventRecorder) {
         this.flinkServiceFactory = flinkServiceFactory;
         this.configManager = configManager;
         this.eventRecorder = eventRecorder;
-        this.statusRecorder = statusRecorder;
     }
 
     private JobStatusObserver<VoidObserverContext> getJobStatusObserver(FlinkService flinkService) {
@@ -101,7 +97,7 @@ public class SessionJobObserver implements Observer<FlinkSessionJob> {
     }
 
     @Override
-    public void observe(FlinkSessionJob flinkSessionJob, Context context) {
+    public void observe(FlinkSessionJob flinkSessionJob, Context<?> context) {
         if (flinkSessionJob.getStatus().getReconciliationStatus().isFirstDeployment()) {
             return;
         }
@@ -120,6 +116,7 @@ public class SessionJobObserver implements Observer<FlinkSessionJob> {
         if (reconciliationStatus.getState() == ReconciliationState.UPGRADING) {
             checkIfAlreadyUpgraded(flinkSessionJob, deployedConfig, flinkService);
             if (reconciliationStatus.getState() == ReconciliationState.UPGRADING) {
+                ReconciliationUtils.clearLastReconciledSpecIfFirstDeploy(flinkSessionJob);
                 return;
             }
         }
@@ -129,9 +126,9 @@ public class SessionJobObserver implements Observer<FlinkSessionJob> {
                         flinkSessionJob, deployedConfig, VoidObserverContext.INSTANCE);
 
         if (jobFound) {
-            SavepointObserver savepointObserver =
-                    new SavepointObserver<>(
-                            flinkService, configManager, statusRecorder, eventRecorder);
+            var savepointObserver =
+                    new SavepointObserver<FlinkSessionJob, FlinkSessionJobStatus>(
+                            flinkService, configManager, eventRecorder);
             savepointObserver.observeSavepointStatus(flinkSessionJob, deployedConfig);
         }
         SavepointUtils.resetTriggerIfJobNotRunning(flinkSessionJob, eventRecorder);

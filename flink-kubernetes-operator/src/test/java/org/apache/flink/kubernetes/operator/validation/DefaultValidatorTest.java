@@ -158,15 +158,14 @@ public class DefaultValidatorTest {
                         CheckpointingOptions.SAVEPOINT_DIRECTORY.key()));
 
         testError(
-                dep -> {
-                    dep.getSpec()
-                            .setFlinkConfiguration(
-                                    Map.of(
-                                            KubernetesOperatorConfigOptions
-                                                    .PERIODIC_SAVEPOINT_INTERVAL
-                                                    .key(),
-                                            "1m"));
-                },
+                dep ->
+                        dep.getSpec()
+                                .setFlinkConfiguration(
+                                        Map.of(
+                                                KubernetesOperatorConfigOptions
+                                                        .PERIODIC_SAVEPOINT_INTERVAL
+                                                        .key(),
+                                                "1m")),
                 String.format(
                         "Periodic savepoints cannot be enabled when config key[%s] is not set",
                         CheckpointingOptions.SAVEPOINT_DIRECTORY.key()));
@@ -466,39 +465,47 @@ public class DefaultValidatorTest {
                 "The LAST_STATE upgrade mode is not supported in session job now.");
 
         testSessionJobValidateWithModifier(
-                sessionJob -> {
-                    sessionJob.getSpec().getJob().setState(JobState.SUSPENDED);
-                },
+                sessionJob -> sessionJob.getSpec().getJob().setState(JobState.SUSPENDED),
                 flinkDeployment -> {},
                 "Job must start in running state");
 
         testSessionJobValidateWithModifier(
-                sessionJob -> {
-                    sessionJob
-                            .getSpec()
-                            .setFlinkConfiguration(
-                                    Map.of(
-                                            KubernetesOperatorConfigOptions.JAR_ARTIFACT_HTTP_HEADER
-                                                    .key(),
-                                            "headerKey1:headerValue1,headerKey2:headerValue2"));
-                },
+                sessionJob ->
+                        sessionJob
+                                .getSpec()
+                                .setFlinkConfiguration(
+                                        Map.of(
+                                                KubernetesOperatorConfigOptions
+                                                        .JAR_ARTIFACT_HTTP_HEADER
+                                                        .key(),
+                                                "headerKey1:headerValue1,headerKey2:headerValue2")),
                 flinkDeployment -> {},
                 null);
 
         testSessionJobValidateWithModifier(
-                sessionJob -> {
-                    sessionJob
-                            .getSpec()
-                            .setFlinkConfiguration(
-                                    Map.of(
-                                            KubernetesOperatorConfigOptions
-                                                    .OPERATOR_RECONCILE_INTERVAL
-                                                    .key(),
-                                            "60"));
-                },
+                sessionJob ->
+                        sessionJob
+                                .getSpec()
+                                .setFlinkConfiguration(
+                                        Map.of(
+                                                KubernetesOperatorConfigOptions
+                                                        .OPERATOR_RECONCILE_INTERVAL
+                                                        .key(),
+                                                "60")),
                 flinkDeployment -> {},
                 "Invalid session job flinkConfiguration key: kubernetes.operator.reconcile.interval."
                         + " Allowed keys are [kubernetes.operator.user.artifacts.http.header]");
+
+        testSessionJobValidateWithModifier(
+                sessionJob -> {
+                    sessionJob
+                            .getStatus()
+                            .getReconciliationStatus()
+                            .serializeAndSetLastReconciledSpec(sessionJob.getSpec(), sessionJob);
+                    sessionJob.getSpec().setDeploymentName("new-deployment-name");
+                },
+                flinkDeployment -> {},
+                "The deploymentName can't be changed");
     }
 
     private void testSessionJobValidateWithModifier(

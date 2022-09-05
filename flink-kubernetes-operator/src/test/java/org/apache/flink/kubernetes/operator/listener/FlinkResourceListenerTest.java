@@ -17,11 +17,11 @@
 
 package org.apache.flink.kubernetes.operator.listener;
 
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.kubernetes.operator.TestUtils;
 import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.crd.status.FlinkDeploymentStatus;
 import org.apache.flink.kubernetes.operator.crd.status.JobManagerDeploymentStatus;
+import org.apache.flink.kubernetes.operator.metrics.MetricManager;
 import org.apache.flink.kubernetes.operator.utils.EventRecorder;
 import org.apache.flink.kubernetes.operator.utils.StatusRecorder;
 
@@ -30,6 +30,7 @@ import io.fabric8.kubernetes.client.server.mock.EnableKubernetesMockClient;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -52,11 +53,8 @@ public class FlinkResourceListenerTest {
         var listener2 = new TestingListener();
         var listeners = List.<FlinkResourceListener>of(listener1, listener2);
 
-        var statusRecorder =
-                StatusRecorder.<FlinkDeploymentStatus>create(
-                        kubernetesClient,
-                        TestUtils.createTestMetricManager(new Configuration()),
-                        listeners);
+        StatusRecorder<FlinkDeployment, FlinkDeploymentStatus> statusRecorder =
+                StatusRecorder.create(kubernetesClient, new MetricManager<>(), listeners);
         var eventRecorder = EventRecorder.create(kubernetesClient, listeners);
 
         var deployment = TestUtils.buildApplicationCluster();
@@ -76,6 +74,8 @@ public class FlinkResourceListenerTest {
 
         assertEquals(1, listener2.updates.size());
         assertEquals(deployment, listener2.updates.get(0).getFlinkResource());
+        assertEquals(
+                listener1.updates.get(0).getTimestamp(), listener2.updates.get(0).getTimestamp());
 
         deployment.getStatus().setJobManagerDeploymentStatus(JobManagerDeploymentStatus.DEPLOYING);
         statusRecorder.patchAndCacheStatus(deployment);
@@ -112,6 +112,11 @@ public class FlinkResourceListenerTest {
 
         for (int i = 0; i < listener1.events.size(); i++) {
             assertEquals(listener1.events.get(i).getEvent(), listener2.events.get(i).getEvent());
+            assertEquals(
+                    listener1.events.get(i).getTimestamp(),
+                    Instant.parse(listener1.events.get(i).getEvent().getLastTimestamp()));
+            assertEquals(
+                    listener1.events.get(i).getTimestamp(), listener2.events.get(i).getTimestamp());
         }
     }
 }

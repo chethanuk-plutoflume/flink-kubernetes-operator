@@ -21,6 +21,7 @@ package org.apache.flink.kubernetes.operator.config;
 import org.apache.flink.annotation.docs.Documentation;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
+import org.apache.flink.core.execution.SavepointFormatType;
 
 import io.javaoperatorsdk.operator.api.config.ConfigurationService;
 import io.javaoperatorsdk.operator.api.reconciler.Constants;
@@ -233,7 +234,7 @@ public class KubernetesOperatorConfigOptions {
                     .withDescription(
                             "Comma separated list of namespaces the operator monitors for custom resources.");
 
-    @Documentation.Section(SECTION_SYSTEM)
+    @Documentation.Section(SECTION_ADVANCED)
     public static final ConfigOption<String> OPERATOR_LABEL_SELECTOR =
             ConfigOptions.key("kubernetes.operator.label.selector")
                     .stringType()
@@ -280,4 +281,26 @@ public class KubernetesOperatorConfigOptions {
                     .defaultValue(true)
                     .withDescription(
                             "Enables last-state fallback for savepoint upgrade mode. When the job is not running thus savepoint cannot be triggered but HA metadata is available for last state restore the operator can initiate the upgrade process when the flag is enabled.");
+
+    @Documentation.Section(SECTION_DYNAMIC)
+    public static final ConfigOption<SavepointFormatType> OPERATOR_SAVEPOINT_FORMAT_TYPE =
+            ConfigOptions.key("kubernetes.operator.savepoint.format.type")
+                    .enumType(SavepointFormatType.class)
+                    .defaultValue(SavepointFormatType.DEFAULT)
+                    .withDescription(
+                            "Type of the binary format in which a savepoint should be taken.");
+
+    @Documentation.Section(SECTION_ADVANCED)
+    public static final ConfigOption<Boolean> OPERATOR_HEALTH_PROBE_ENABLED =
+            ConfigOptions.key("kubernetes.operator.health.probe.enabled")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription("Enables health probe for the kubernetes operator.");
+
+    @Documentation.Section(SECTION_ADVANCED)
+    public static final ConfigOption<Integer> OPERATOR_HEALTH_PROBE_PORT =
+            ConfigOptions.key("kubernetes.operator.health.probe.port")
+                    .intType()
+                    .defaultValue(8085)
+                    .withDescription("The port the health probe will use to expose the status.");
 }

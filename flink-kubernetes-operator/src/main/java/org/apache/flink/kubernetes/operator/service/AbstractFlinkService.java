@@ -25,11 +25,11 @@ import org.apache.flink.client.program.rest.RestClusterClient;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.RestOptions;
-import org.apache.flink.core.execution.SavepointFormatType;
 import org.apache.flink.kubernetes.configuration.KubernetesConfigOptions;
 import org.apache.flink.kubernetes.kubeclient.decorators.ExternalServiceDecorator;
 import org.apache.flink.kubernetes.operator.artifact.ArtifactManager;
 import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
+import org.apache.flink.kubernetes.operator.config.KubernetesOperatorConfigOptions;
 import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.crd.FlinkSessionJob;
 import org.apache.flink.kubernetes.operator.crd.spec.FlinkSessionJobSpec;
@@ -99,7 +99,6 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketAddress;
-import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.util.Arrays;
 import java.util.Collection;
@@ -202,10 +201,9 @@ public abstract class AbstractFlinkService implements FlinkService {
             socket.connect(socketAddress, 1000);
             socket.close();
             return true;
-        } catch (SocketTimeoutException ste) {
         } catch (IOException e) {
+            return false;
         }
-        return false;
     }
 
     @Override
@@ -293,7 +291,9 @@ public abstract class AbstractFlinkService implements FlinkService {
                                                     conf.get(FLINK_VERSION)
                                                                     .isNewerVersionThan(
                                                                             FlinkVersion.v1_14)
-                                                            ? SavepointFormatType.DEFAULT
+                                                            ? conf.get(
+                                                                    KubernetesOperatorConfigOptions
+                                                                            .OPERATOR_SAVEPOINT_FORMAT_TYPE)
                                                             : null)
                                             .get(timeout, TimeUnit.SECONDS);
                             savepointOpt = Optional.of(savepoint);
@@ -386,7 +386,9 @@ public abstract class AbstractFlinkService implements FlinkService {
                                                 conf.get(FLINK_VERSION)
                                                                 .isNewerVersionThan(
                                                                         FlinkVersion.v1_14)
-                                                        ? SavepointFormatType.DEFAULT
+                                                        ? conf.get(
+                                                                KubernetesOperatorConfigOptions
+                                                                        .OPERATOR_SAVEPOINT_FORMAT_TYPE)
                                                         : null)
                                         .get(timeout, TimeUnit.SECONDS);
                         savepointOpt = Optional.of(savepoint);
@@ -444,7 +446,9 @@ public abstract class AbstractFlinkService implements FlinkService {
                                             false,
                                             conf.get(FLINK_VERSION)
                                                             .isNewerVersionThan(FlinkVersion.v1_14)
-                                                    ? SavepointFormatType.DEFAULT
+                                                    ? conf.get(
+                                                            KubernetesOperatorConfigOptions
+                                                                    .OPERATOR_SAVEPOINT_FORMAT_TYPE)
                                                     : null,
                                             null))
                             .get(timeout, TimeUnit.SECONDS);

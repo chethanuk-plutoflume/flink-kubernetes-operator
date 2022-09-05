@@ -63,6 +63,18 @@
             <td>The timeout for the observer to wait the flink rest client to return.</td>
         </tr>
         <tr>
+            <td><h5>kubernetes.operator.health.probe.enabled</h5></td>
+            <td style="word-wrap: break-word;">true</td>
+            <td>Boolean</td>
+            <td>Enables health probe for the kubernetes operator.</td>
+        </tr>
+        <tr>
+            <td><h5>kubernetes.operator.health.probe.port</h5></td>
+            <td style="word-wrap: break-word;">8085</td>
+            <td>Integer</td>
+            <td>The port the health probe will use to expose the status.</td>
+        </tr>
+        <tr>
             <td><h5>kubernetes.operator.jm-deployment-recovery.enabled</h5></td>
             <td style="word-wrap: break-word;">true</td>
             <td>Boolean</td>
@@ -112,7 +124,7 @@
         </tr>
         <tr>
             <td><h5>kubernetes.operator.reconcile.parallelism</h5></td>
-            <td style="word-wrap: break-word;">5</td>
+            <td style="word-wrap: break-word;">10</td>
             <td>Integer</td>
             <td>The maximum number of threads running the reconciliation loop. Use -1 for infinite.</td>
         </tr>
@@ -139,6 +151,12 @@
             <td style="word-wrap: break-word;">10</td>
             <td>Integer</td>
             <td>Max attempts of automatic reconcile retries on recoverable errors.</td>
+        </tr>
+        <tr>
+            <td><h5>kubernetes.operator.savepoint.format.type</h5></td>
+            <td style="word-wrap: break-word;">CANONICAL</td>
+            <td><p>Enum</p></td>
+            <td>Type of the binary format in which a savepoint should be taken.<br /><br />Possible values:<ul><li>"CANONICAL": A canonical, common for all state backends format. It lets you switch state backends.</li><li>"NATIVE": A format specific for the chosen state backend, in its native binary format. Might be faster to take and restore from than the canonical one.</li></ul></td>
         </tr>
         <tr>
             <td><h5>kubernetes.operator.savepoint.history.max.age</h5></td>

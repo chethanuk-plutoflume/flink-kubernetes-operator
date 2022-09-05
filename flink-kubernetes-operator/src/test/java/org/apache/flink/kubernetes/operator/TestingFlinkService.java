@@ -23,6 +23,7 @@ import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.client.program.ClusterClient;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.DeploymentOptions;
+import org.apache.flink.configuration.JobManagerOptions;
 import org.apache.flink.kubernetes.configuration.KubernetesConfigOptions;
 import org.apache.flink.kubernetes.configuration.KubernetesDeploymentTarget;
 import org.apache.flink.kubernetes.operator.config.FlinkConfigBuilder;
@@ -40,6 +41,7 @@ import org.apache.flink.kubernetes.operator.crd.status.SavepointTriggerType;
 import org.apache.flink.kubernetes.operator.exception.DeploymentFailedException;
 import org.apache.flink.kubernetes.operator.observer.SavepointFetchResult;
 import org.apache.flink.kubernetes.operator.service.AbstractFlinkService;
+import org.apache.flink.kubernetes.operator.standalone.StandaloneKubernetesConfigOptionsInternal;
 import org.apache.flink.kubernetes.operator.utils.FlinkUtils;
 import org.apache.flink.runtime.client.JobStatusMessage;
 import org.apache.flink.runtime.execution.ExecutionState;
@@ -53,13 +55,11 @@ import org.apache.flink.runtime.rest.messages.EmptyResponseBody;
 import org.apache.flink.runtime.rest.messages.JobsOverviewHeaders;
 import org.apache.flink.util.SerializedThrowable;
 
+import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.ObjectMeta;
 import io.fabric8.kubernetes.api.model.PodList;
 import io.fabric8.kubernetes.client.KubernetesClient;
-import io.javaoperatorsdk.operator.api.config.ControllerConfiguration;
 import io.javaoperatorsdk.operator.api.reconciler.Context;
-import io.javaoperatorsdk.operator.api.reconciler.RetryInfo;
-import io.javaoperatorsdk.operator.api.reconciler.dependent.managed.ManagedDependentResourceContext;
 
 import javax.annotation.Nullable;
 
@@ -100,6 +100,7 @@ public class TestingFlinkService extends AbstractFlinkService {
     private Consumer<Configuration> listJobConsumer = conf -> {};
     private List<String> disposedSavepoints = new ArrayList<>();
     private Map<String, Boolean> savepointTriggers = new HashMap<>();
+    private int desiredReplicas = 0;
 
     public TestingFlinkService() {
         super(null, new FlinkConfigManager(new Configuration()));
@@ -109,34 +110,15 @@ public class TestingFlinkService extends AbstractFlinkService {
         super(kubernetesClient, new FlinkConfigManager(new Configuration()));
     }
 
-    public Context getContext() {
-        return new Context() {
-            @Override
-            public Optional<RetryInfo> getRetryInfo() {
-                return Optional.empty();
-            }
+    public <T extends HasMetadata> Context<T> getContext() {
+        return new TestUtils.TestingContext<>() {
 
             @Override
-            public Optional getSecondaryResource(Class aClass, String s) {
+            public Optional<T> getSecondaryResource(Class aClass, String s) {
                 if (jobs.isEmpty() && sessions.isEmpty()) {
                     return Optional.empty();
                 }
-                return Optional.of(TestUtils.createDeployment(true));
-            }
-
-            @Override
-            public Set getSecondaryResources(Class expectedType) {
-                return null;
-            }
-
-            @Override
-            public ControllerConfiguration getControllerConfiguration() {
-                return null;
-            }
-
-            @Override
-            public ManagedDependentResourceContext managedDependentResourceContext() {
-                return null;
+                return (Optional<T>) Optional.of(TestUtils.createDeployment(true));
             }
         };
     }
@@ -375,7 +357,7 @@ public class TestingFlinkService extends AbstractFlinkService {
         Optional<Tuple2<String, JobStatusMessage>> jobOpt =
                 jobs.stream().filter(js -> js.f1.getJobId().equals(jobID)).findAny();
 
-        if (!jobOpt.isPresent()) {
+        if (jobOpt.isEmpty()) {
             throw new Exception("Job not found");
         }
 
@@ -423,7 +405,7 @@ public class TestingFlinkService extends AbstractFlinkService {
         Optional<Tuple2<String, JobStatusMessage>> jobOpt =
                 jobs.stream().filter(js -> js.f1.getJobId().equals(jobId)).findAny();
 
-        if (!jobOpt.isPresent()) {
+        if (jobOpt.isEmpty()) {
             throw new Exception("Job not found");
         }
 
@@ -464,7 +446,7 @@ public class TestingFlinkService extends AbstractFlinkService {
 
     public void markApplicationJobFailedWithError(JobID jobID, String error) throws Exception {
         var job = jobs.stream().filter(tuple -> tuple.f1.getJobId().equals(jobID)).findFirst();
-        if (!job.isPresent()) {
+        if (job.isEmpty()) {
             throw new Exception("The target job missed");
         }
         var oldStatus = job.get().f1;
@@ -494,7 +476,21 @@ public class TestingFlinkService extends AbstractFlinkService {
     }
 
     @Override
-    public Map<String, String> getClusterInfo(Configuration conf) throws Exception {
+    public Map<String, String> getClusterInfo(Configuration conf) {
         return CLUSTER_INFO;
+    }
+
+    @Override
+    public boolean scale(ObjectMeta meta, JobSpec jobSpec, Configuration conf) {
+        if (conf.get(JobManagerOptions.SCHEDULER_MODE) == null) {
+            return false;
+        }
+        desiredReplicas =
+                conf.get(StandaloneKubernetesConfigOptionsInternal.KUBERNETES_TASKMANAGER_REPLICAS);
+        return true;
+    }
+
+    public int getDesiredReplicas() {
+        return desiredReplicas;
     }
 }

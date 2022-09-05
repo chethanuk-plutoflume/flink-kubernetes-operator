@@ -22,7 +22,6 @@ import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.kubernetes.operator.TestUtils;
 import org.apache.flink.kubernetes.operator.TestingFlinkService;
-import org.apache.flink.kubernetes.operator.TestingStatusRecorder;
 import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
 import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.crd.spec.JobState;
@@ -49,8 +48,8 @@ import java.time.Instant;
 import java.util.HashMap;
 import java.util.stream.Collectors;
 
-import static org.junit.Assert.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -59,7 +58,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @EnableKubernetesMockClient(crud = true)
 public class ApplicationObserverTest {
     private KubernetesClient kubernetesClient;
-    private final Context readyContext = TestUtils.createContextWithReadyJobManagerDeployment();
+    private final Context<FlinkDeployment> readyContext =
+            TestUtils.createContextWithReadyJobManagerDeployment();
     private final FlinkConfigManager configManager = new FlinkConfigManager(new Configuration());
     private final TestingFlinkService flinkService = new TestingFlinkService();
     private ApplicationObserver observer;
@@ -67,9 +67,7 @@ public class ApplicationObserverTest {
     @BeforeEach
     public void before() {
         var eventRecorder = new EventRecorder(kubernetesClient, (r, e) -> {});
-        observer =
-                new ApplicationObserver(
-                        flinkService, configManager, new TestingStatusRecorder<>(), eventRecorder);
+        observer = new ApplicationObserver(flinkService, configManager, eventRecorder);
     }
 
     @Test
@@ -432,10 +430,10 @@ public class ApplicationObserverTest {
         Exception exception =
                 assertThrows(
                         DeploymentFailedException.class,
-                        () -> {
-                            observer.observe(
-                                    deployment, TestUtils.createContextWithInProgressDeployment());
-                        });
+                        () ->
+                                observer.observe(
+                                        deployment,
+                                        TestUtils.createContextWithInProgressDeployment()));
         assertEquals(podFailedMessage, exception.getMessage());
     }
 
@@ -490,8 +488,23 @@ public class ApplicationObserverTest {
                 status.getJobManagerDeploymentStatus());
 
         var specWithMeta = status.getReconciliationStatus().deserializeLastReconciledSpecWithMeta();
-        assertEquals(321L, specWithMeta.f1.get("metadata").get("generation").asLong());
+        assertEquals(321L, specWithMeta.f1.getMetadata().getGeneration());
         assertEquals(JobState.RUNNING, specWithMeta.f0.getJob().getState());
         assertEquals(5, specWithMeta.f0.getJob().getParallelism());
+    }
+
+    @Test
+    public void validateLastReconciledClearedOnInitialFailure() {
+        FlinkDeployment deployment = TestUtils.buildApplicationCluster();
+        deployment.getMetadata().setGeneration(123L);
+
+        ReconciliationUtils.updateStatusBeforeDeploymentAttempt(
+                deployment,
+                new FlinkConfigManager(new Configuration())
+                        .getDeployConfig(deployment.getMetadata(), deployment.getSpec()));
+
+        assertFalse(deployment.getStatus().getReconciliationStatus().isFirstDeployment());
+        observer.observe(deployment, TestUtils.createEmptyContext());
+        assertTrue(deployment.getStatus().getReconciliationStatus().isFirstDeployment());
     }
 }

@@ -21,6 +21,7 @@ import org.apache.flink.annotation.Experimental;
 
 import io.fabric8.kubernetes.api.model.Pod;
 import lombok.AllArgsConstructor;
+import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
@@ -29,6 +30,7 @@ import lombok.NoArgsConstructor;
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
+@Builder
 public class JobManagerSpec {
     /** Resource specification for the JobManager pods. */
     private Resource resource;

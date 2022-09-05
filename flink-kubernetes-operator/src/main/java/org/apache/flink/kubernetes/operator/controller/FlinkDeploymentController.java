@@ -64,7 +64,7 @@ public class FlinkDeploymentController
     private final Set<FlinkResourceValidator> validators;
     private final ReconcilerFactory reconcilerFactory;
     private final ObserverFactory observerFactory;
-    private final StatusRecorder<FlinkDeploymentStatus> statusRecorder;
+    private final StatusRecorder<FlinkDeployment, FlinkDeploymentStatus> statusRecorder;
     private final EventRecorder eventRecorder;
 
     public FlinkDeploymentController(
@@ -72,7 +72,7 @@ public class FlinkDeploymentController
             Set<FlinkResourceValidator> validators,
             ReconcilerFactory reconcilerFactory,
             ObserverFactory observerFactory,
-            StatusRecorder<FlinkDeploymentStatus> statusRecorder,
+            StatusRecorder<FlinkDeployment, FlinkDeploymentStatus> statusRecorder,
             EventRecorder eventRecorder) {
         this.configManager = configManager;
         this.validators = validators;
@@ -98,6 +98,7 @@ public class FlinkDeploymentController
     @Override
     public UpdateControl<FlinkDeployment> reconcile(FlinkDeployment flinkApp, Context context)
             throws Exception {
+
         LOG.info("Starting reconciliation");
         statusRecorder.updateStatusFromCache(flinkApp);
         FlinkDeployment previousDeployment = ReconciliationUtils.clone(flinkApp);
@@ -116,6 +117,12 @@ public class FlinkDeploymentController
         } catch (DeploymentFailedException dfe) {
             handleDeploymentFailed(flinkApp, dfe);
         } catch (Exception e) {
+            eventRecorder.triggerEvent(
+                    flinkApp,
+                    EventRecorder.Type.Warning,
+                    "ClusterDeploymentException",
+                    e.getMessage(),
+                    EventRecorder.Component.JobManagerDeployment);
             throw new ReconciliationException(e);
         }
 
@@ -157,6 +164,12 @@ public class FlinkDeploymentController
         for (FlinkResourceValidator validator : validators) {
             Optional<String> validationError = validator.validateDeployment(deployment);
             if (validationError.isPresent()) {
+                eventRecorder.triggerEvent(
+                        deployment,
+                        EventRecorder.Type.Warning,
+                        EventRecorder.Reason.ValidationError,
+                        EventRecorder.Component.Operator,
+                        validationError.get());
                 return ReconciliationUtils.applyValidationErrorAndResetSpec(
                         deployment, validationError.get());
             }

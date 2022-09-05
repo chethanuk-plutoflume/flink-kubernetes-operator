@@ -22,8 +22,7 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.HighAvailabilityOptions;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.kubernetes.highavailability.KubernetesHaServicesFactory;
-import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
-import org.apache.flink.kubernetes.operator.crd.AbstractFlinkResource;
+import org.apache.flink.kubernetes.operator.config.KubernetesOperatorConfigOptions;
 import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.crd.FlinkSessionJob;
 import org.apache.flink.kubernetes.operator.crd.spec.FlinkDeploymentSpec;
@@ -40,13 +39,13 @@ import org.apache.flink.kubernetes.operator.crd.status.FlinkSessionJobStatus;
 import org.apache.flink.kubernetes.operator.crd.status.JobManagerDeploymentStatus;
 import org.apache.flink.kubernetes.operator.exception.DeploymentFailedException;
 import org.apache.flink.kubernetes.operator.metrics.KubernetesOperatorMetricGroup;
-import org.apache.flink.kubernetes.operator.metrics.MetricManager;
 import org.apache.flink.runtime.metrics.MetricRegistry;
 import org.apache.flink.runtime.metrics.util.TestingMetricRegistry;
 
 import io.fabric8.kubernetes.api.model.Container;
 import io.fabric8.kubernetes.api.model.ContainerStatus;
 import io.fabric8.kubernetes.api.model.ContainerStatusBuilder;
+import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.ObjectMeta;
 import io.fabric8.kubernetes.api.model.ObjectMetaBuilder;
 import io.fabric8.kubernetes.api.model.Pod;
@@ -87,7 +86,7 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Testing utilities. */
 public class TestUtils {
@@ -109,20 +108,38 @@ public class TestUtils {
     }
 
     public static FlinkDeployment buildSessionCluster(FlinkVersion version) {
+        return buildSessionCluster(TEST_DEPLOYMENT_NAME, TEST_NAMESPACE, version);
+    }
+
+    public static FlinkDeployment buildSessionCluster(
+            String name, String namespace, FlinkVersion version) {
         FlinkDeployment deployment = new FlinkDeployment();
         deployment.setStatus(new FlinkDeploymentStatus());
         deployment.setMetadata(
                 new ObjectMetaBuilder()
-                        .withName(TEST_DEPLOYMENT_NAME)
-                        .withNamespace(TEST_NAMESPACE)
+                        .withName(name)
+                        .withNamespace(namespace)
                         .withCreationTimestamp(Instant.now().toString())
                         .build());
         deployment.setSpec(getTestFlinkDeploymentSpec(version));
         return deployment;
     }
 
+    public static FlinkDeployment buildApplicationCluster() {
+        return buildApplicationCluster(FlinkVersion.v1_15);
+    }
+
+    public static FlinkDeployment buildApplicationCluster(String name, String namespace) {
+        return buildApplicationCluster(name, namespace, FlinkVersion.v1_15);
+    }
+
     public static FlinkDeployment buildApplicationCluster(FlinkVersion version) {
-        FlinkDeployment deployment = buildSessionCluster(version);
+        return buildApplicationCluster(TEST_DEPLOYMENT_NAME, TEST_NAMESPACE, version);
+    }
+
+    public static FlinkDeployment buildApplicationCluster(
+            String name, String namespace, FlinkVersion version) {
+        FlinkDeployment deployment = buildSessionCluster(name, namespace, version);
         deployment
                 .getSpec()
                 .setJob(
@@ -136,21 +153,20 @@ public class TestUtils {
         return deployment;
     }
 
-    public static FlinkDeployment buildApplicationCluster() {
-        return buildApplicationCluster(FlinkVersion.v1_15);
-    }
-
-    public static FlinkSessionJob buildSessionJob() {
+    public static FlinkSessionJob buildSessionJob(String name, String namespace) {
         FlinkSessionJob sessionJob = new FlinkSessionJob();
         sessionJob.setStatus(new FlinkSessionJobStatus());
         sessionJob.setMetadata(
                 new ObjectMetaBuilder()
-                        .withName(TEST_SESSION_JOB_NAME)
-                        .withNamespace(TEST_NAMESPACE)
+                        .withName(name)
+                        .withNamespace(namespace)
                         .withCreationTimestamp(Instant.now().toString())
                         .withUid(UUID.randomUUID().toString())
                         .withGeneration(1L)
                         .build());
+
+        Map<String, String> conf = new HashMap<>();
+        conf.put(KubernetesOperatorConfigOptions.JAR_ARTIFACT_HTTP_HEADER.key(), "header");
         sessionJob.setSpec(
                 FlinkSessionJobSpec.builder()
                         .deploymentName(TEST_DEPLOYMENT_NAME)
@@ -161,8 +177,13 @@ public class TestUtils {
                                         .upgradeMode(UpgradeMode.STATELESS)
                                         .state(JobState.RUNNING)
                                         .build())
+                        .flinkConfiguration(conf)
                         .build());
         return sessionJob;
+    }
+
+    public static FlinkSessionJob buildSessionJob() {
+        return buildSessionJob(TEST_SESSION_JOB_NAME, TEST_NAMESPACE);
     }
 
     public static FlinkDeploymentSpec getTestFlinkDeploymentSpec(FlinkVersion version) {
@@ -228,128 +249,64 @@ public class TestUtils {
         return deployment;
     }
 
-    public static Context createContextWithDeployment(@Nullable Deployment deployment) {
-        return new Context() {
+    public static <T extends HasMetadata> Context<T> createContextWithDeployment(
+            @Nullable Deployment deployment) {
+        return new TestingContext<>() {
             @Override
-            public Optional<RetryInfo> getRetryInfo() {
-                return Optional.empty();
-            }
-
-            @Override
-            public Optional getSecondaryResource(Class expectedType, String eventSourceName) {
-                return Optional.ofNullable(deployment);
-            }
-
-            @Override
-            public Set getSecondaryResources(Class expectedType) {
-                return null;
-            }
-
-            @Override
-            public ControllerConfiguration getControllerConfiguration() {
-                return null;
-            }
-
-            @Override
-            public ManagedDependentResourceContext managedDependentResourceContext() {
-                return null;
+            public Optional<T> getSecondaryResource(Class expectedType, String eventSourceName) {
+                return (Optional<T>) Optional.ofNullable(deployment);
             }
         };
     }
 
-    public static Context createEmptyContext() {
+    public static <T extends HasMetadata> Context<T> createEmptyContext() {
         return createContextWithDeployment(null);
     }
 
-    public static Context createContextWithReadyJobManagerDeployment() {
+    public static <T extends HasMetadata> Context<T> createContextWithReadyJobManagerDeployment() {
         return createContextWithDeployment(createDeployment(true));
     }
 
-    public static Context createContextWithInProgressDeployment() {
+    public static <T extends HasMetadata> Context<T> createContextWithInProgressDeployment() {
         return createContextWithDeployment(createDeployment(false));
     }
 
-    public static Context createContextWithReadyFlinkDeployment() {
+    public static <T extends HasMetadata> Context<T> createContextWithReadyFlinkDeployment() {
         return createContextWithReadyFlinkDeployment(new HashMap<>());
     }
 
-    public static Context createContextWithReadyFlinkDeployment(
+    public static <T extends HasMetadata> Context<T> createContextWithReadyFlinkDeployment(
             Map<String, String> flinkDepConfig) {
-        return new Context() {
+        return new TestingContext<>() {
             @Override
-            public Optional<RetryInfo> getRetryInfo() {
-                return Optional.empty();
-            }
-
-            @Override
-            public Optional getSecondaryResource(Class expectedType, String eventSourceName) {
+            public Optional<T> getSecondaryResource(Class expectedType, String eventSourceName) {
                 var session = buildSessionCluster();
                 session.getStatus().setJobManagerDeploymentStatus(JobManagerDeploymentStatus.READY);
                 session.getSpec().getFlinkConfiguration().putAll(flinkDepConfig);
                 session.getStatus()
                         .getReconciliationStatus()
                         .serializeAndSetLastReconciledSpec(session.getSpec(), session);
-                return Optional.of(session);
-            }
-
-            @Override
-            public Set getSecondaryResources(Class expectedType) {
-                return null;
-            }
-
-            @Override
-            public ControllerConfiguration getControllerConfiguration() {
-                return null;
-            }
-
-            @Override
-            public ManagedDependentResourceContext managedDependentResourceContext() {
-                return null;
+                return (Optional<T>) Optional.of(session);
             }
         };
     }
 
-    public static Context createContextWithNotReadyFlinkDeployment() {
-        return new Context() {
+    public static <T extends HasMetadata> Context<T> createContextWithNotReadyFlinkDeployment() {
+        return new TestingContext<>() {
             @Override
-            public Optional<RetryInfo> getRetryInfo() {
-                return Optional.empty();
-            }
-
-            @Override
-            public Optional getSecondaryResource(Class expectedType, String eventSourceName) {
+            public Optional<T> getSecondaryResource(Class expectedType, String eventSourceName) {
                 var session = buildSessionCluster();
                 session.getStatus()
                         .setJobManagerDeploymentStatus(JobManagerDeploymentStatus.MISSING);
-                return Optional.of(session);
-            }
-
-            @Override
-            public Set getSecondaryResources(Class expectedType) {
-                return null;
-            }
-
-            @Override
-            public ControllerConfiguration getControllerConfiguration() {
-                return null;
-            }
-
-            @Override
-            public ManagedDependentResourceContext managedDependentResourceContext() {
-                return null;
+                return (Optional<T>) Optional.of(session);
             }
         };
     }
 
     public static final String DEPLOYMENT_ERROR = "test deployment error message";
 
-    public static Context createContextWithFailedJobManagerDeployment() {
-        return new Context() {
-            @Override
-            public Optional<RetryInfo> getRetryInfo() {
-                return Optional.empty();
-            }
-
+    public static <T extends HasMetadata> Context<T> createContextWithFailedJobManagerDeployment() {
+        return new TestingContext<>() {
             @Override
             public Optional getSecondaryResource(Class expectedType, String eventSourceName) {
                 DeploymentStatus status = new DeploymentStatus();
@@ -371,21 +328,6 @@ public class TestUtils {
                 deployment.setSpec(spec);
                 deployment.setStatus(status);
                 return Optional.of(deployment);
-            }
-
-            @Override
-            public Set getSecondaryResources(Class expectedType) {
-                return null;
-            }
-
-            @Override
-            public ControllerConfiguration getControllerConfiguration() {
-                return null;
-            }
-
-            @Override
-            public ManagedDependentResourceContext managedDependentResourceContext() {
-                return null;
             }
         };
     }
@@ -431,27 +373,22 @@ public class TestUtils {
         }
     }
 
-    public static <T extends AbstractFlinkResource<?, ?>> MetricManager<T> createTestMetricManager(
-            Configuration conf) {
-        return createTestMetricManager(
-                TestingMetricRegistry.builder()
-                        .setDelimiter(".".charAt(0))
-                        .setRegisterConsumer((metric, name, group) -> {})
-                        .build(),
-                conf);
-    }
-
-    public static <T extends AbstractFlinkResource<?, ?>> MetricManager<T> createTestMetricManager(
-            MetricRegistry metricRegistry, Configuration conf) {
-
-        var confManager = new FlinkConfigManager(conf);
-        return new MetricManager<>(createTestMetricGroup(metricRegistry, conf), confManager);
+    public static KubernetesOperatorMetricGroup createTestMetricGroup(Configuration conf) {
+        return createTestMetricGroup(createTestMetricRegistry(), conf);
     }
 
     public static KubernetesOperatorMetricGroup createTestMetricGroup(
             MetricRegistry metricRegistry, Configuration conf) {
         return KubernetesOperatorMetricGroup.create(
                 metricRegistry, conf, TEST_NAMESPACE, "testopname", "testhost");
+    }
+
+    public static TestingMetricRegistry createTestMetricRegistry() {
+
+        return TestingMetricRegistry.builder()
+                .setDelimiter(".".charAt(0))
+                .setRegisterConsumer((metric, name, group) -> {})
+                .build();
     }
 
     /** Testing ResponseProvider. */
@@ -489,6 +426,38 @@ public class TestUtils {
             validator.accept(recordedRequest);
             validated.set(true);
             return returnValue;
+        }
+    }
+
+    /**
+     * Base context implementation for tests.
+     *
+     * @param <T> Resource type
+     */
+    public static class TestingContext<T extends HasMetadata> implements Context<T> {
+        @Override
+        public Optional<RetryInfo> getRetryInfo() {
+            return Optional.empty();
+        }
+
+        @Override
+        public <T1> Set<T1> getSecondaryResources(Class<T1> aClass) {
+            return null;
+        }
+
+        @Override
+        public <T1> Optional<T1> getSecondaryResource(Class<T1> aClass, String s) {
+            return Optional.empty();
+        }
+
+        @Override
+        public ControllerConfiguration<T> getControllerConfiguration() {
+            return null;
+        }
+
+        @Override
+        public ManagedDependentResourceContext managedDependentResourceContext() {
+            return null;
         }
     }
 }

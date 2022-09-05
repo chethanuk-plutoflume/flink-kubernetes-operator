@@ -68,6 +68,51 @@ app.kubernetes.io/name: {{ include "flink-operator.name" . }}
 {{- end }}
 
 {{/*
+Create the name of the operator role to use
+*/}}
+{{- define "flink-operator.roleName" -}}
+{{- if .Values.rbac.operatorRole.create }}
+{{- default (include "flink-operator.fullname" .) .Values.rbac.operatorRole.name }}
+{{- else }}
+{{- default "default" .Values.rbac.operatorRole.name }}
+{{- end }}
+{{- end }}
+
+{{/*
+Create the name of the operator role binding to use
+*/}}
+{{- define "flink-operator.roleBindingName" -}}
+{{- if .Values.rbac.operatorRoleBinding.create }}
+{{- default (include "flink-operator.fullname" .) .Values.rbac.operatorRoleBinding.name }}
+{{- else }}
+{{- default "default" .Values.rbac.operatorRoleBinding.name }}
+{{- end }}
+{{- end }}
+
+{{/*
+Create the name of the job role to use
+*/}}
+{{- define "flink-operator.jobRoleName" -}}
+{{- if .Values.rbac.jobRoleBinding.create }}
+{{- default (include "flink-operator.fullname" .) .Values.rbac.jobRole.name }}
+{{- else }}
+{{- default "default" .Values.rbac.jobRole.name }}
+{{- end }}
+{{- end }}
+
+{{/*
+Create the name of the job role to use
+*/}}
+{{- define "flink-operator.jobRoleBindingName" -}}
+{{- if .Values.rbac.jobRole.create }}
+{{- default (include "flink-operator.fullname" .) .Values.rbac.jobRoleBinding.name }}
+{{- else }}
+{{- default "default" .Values.rbac.jobRoleBinding.name }}
+{{- end }}
+{{- end }}
+
+
+{{/*
 Create the name of the operator service account to use
 */}}
 {{- define "flink-operator.serviceAccountName" -}}
@@ -89,7 +134,18 @@ Create the name of the job service account to use
 {{- end }}
 {{- end }}
 
-{{- define "validating-webhook-enabled" -}}
+{{/*
+Determine role scope based on name
+*/}}
+{{- define "flink-operator.roleScope" -}}
+{{- if contains ":" .role  }}
+{{- printf "ClusterRole" }}
+{{- else }}
+{{- printf "Role" }}
+{{- end }}
+{{- end }}
+
+{{- define "flink-operator.validating-webhook-enabled" -}}
 {{- if hasKey .Values.webhook "validator" }}
 {{- if .Values.webhook.validator.create }}
 {{- printf "true" }}
@@ -105,7 +161,7 @@ Create the name of the job service account to use
 {{- end }}
 {{- end }}
 
-{{- define "mutating-webhook-enabled" -}}
+{{- define "flink-operator.mutating-webhook-enabled" -}}
 {{- if hasKey .Values.webhook "mutator" }}
 {{- if .Values.webhook.mutator.create }}
 {{- printf "true" }}
@@ -121,8 +177,8 @@ Create the name of the job service account to use
 {{- end }}
 {{- end }}
 
-{{- define "webhook-enabled" -}}
-{{- if or (eq (include "validating-webhook-enabled" .) "true") (eq (include "mutating-webhook-enabled" .) "true") }}
+{{- define "flink-operator.webhook-enabled" -}}
+{{- if or (eq (include "flink-operator.validating-webhook-enabled" .) "true") (eq (include "flink-operator.mutating-webhook-enabled" .) "true") }}
 {{- printf "true" }}
 {{- else }}
 {{- printf "false" }}

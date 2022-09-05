@@ -32,7 +32,6 @@ import org.apache.flink.kubernetes.operator.service.FlinkService;
 import org.apache.flink.kubernetes.operator.utils.ConfigOptionUtils;
 import org.apache.flink.kubernetes.operator.utils.EventRecorder;
 import org.apache.flink.kubernetes.operator.utils.SavepointUtils;
-import org.apache.flink.kubernetes.operator.utils.StatusRecorder;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,28 +41,25 @@ import java.util.Iterator;
 import java.util.List;
 
 /** An observer of savepoint progress. */
-public class SavepointObserver<STATUS extends CommonStatus<?>> {
+public class SavepointObserver<
+        CR extends AbstractFlinkResource<?, STATUS>, STATUS extends CommonStatus<?>> {
 
     private static final Logger LOG = LoggerFactory.getLogger(SavepointObserver.class);
 
     private final FlinkService flinkService;
     private final FlinkConfigManager configManager;
-    private final StatusRecorder<STATUS> statusRecorder;
     private final EventRecorder eventRecorder;
 
     public SavepointObserver(
             FlinkService flinkService,
             FlinkConfigManager configManager,
-            StatusRecorder<STATUS> statusRecorder,
             EventRecorder eventRecorder) {
         this.flinkService = flinkService;
         this.configManager = configManager;
-        this.statusRecorder = statusRecorder;
         this.eventRecorder = eventRecorder;
     }
 
-    public void observeSavepointStatus(
-            AbstractFlinkResource<?, STATUS> resource, Configuration deployedConfig) {
+    public void observeSavepointStatus(CR resource, Configuration deployedConfig) {
 
         var jobStatus = resource.getStatus().getJobStatus();
         var savepointInfo = jobStatus.getSavepointInfo();

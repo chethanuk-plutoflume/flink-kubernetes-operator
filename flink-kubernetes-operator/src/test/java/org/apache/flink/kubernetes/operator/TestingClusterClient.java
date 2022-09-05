@@ -57,6 +57,8 @@ public class TestingClusterClient<T> extends RestClusterClient<T> {
             stopWithSavepointFunction =
                     (ignore1, ignore2, savepointPath) ->
                             CompletableFuture.completedFuture(savepointPath);
+    private TriFunction<JobID, SavepointFormatType, String, CompletableFuture<String>>
+            stopWithSavepointFormat;
     private TriFunction<
                     MessageHeaders<?, ?, ?>,
                     MessageParameters,
@@ -76,12 +78,10 @@ public class TestingClusterClient<T> extends RestClusterClient<T> {
                     CompletableFuture.completedFuture(
                             new JobResult.Builder().jobId(jobID).netRuntime(1).build());
 
-    private final Configuration configuration;
     private final T clusterId;
 
     public TestingClusterClient(Configuration configuration, T clusterId) throws Exception {
         super(configuration, clusterId, (c, e) -> new StandaloneClientHAServices("localhost"));
-        this.configuration = configuration;
         this.clusterId = clusterId;
     }
 
@@ -97,6 +97,12 @@ public class TestingClusterClient<T> extends RestClusterClient<T> {
             TriFunction<JobID, Boolean, String, CompletableFuture<String>>
                     stopWithSavepointFunction) {
         this.stopWithSavepointFunction = stopWithSavepointFunction;
+    }
+
+    public void setStopWithSavepointFormat(
+            TriFunction<JobID, SavepointFormatType, String, CompletableFuture<String>>
+                    stopWithSavepointFormat) {
+        this.stopWithSavepointFormat = stopWithSavepointFormat;
     }
 
     public void setRequestProcessor(
@@ -186,7 +192,9 @@ public class TestingClusterClient<T> extends RestClusterClient<T> {
             boolean advanceToEndOfTime,
             @Nullable String savepointDirectory,
             SavepointFormatType formatType) {
-        return stopWithSavepointFunction.apply(jobId, advanceToEndOfTime, savepointDirectory);
+        return stopWithSavepointFormat == null
+                ? stopWithSavepointFunction.apply(jobId, advanceToEndOfTime, savepointDirectory)
+                : stopWithSavepointFormat.apply(jobId, formatType, savepointDirectory);
     }
 
     @Override

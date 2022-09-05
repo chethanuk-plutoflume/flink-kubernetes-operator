@@ -113,7 +113,7 @@ defaultConfiguration:
     kubernetes.operator.metrics.reporter.prom.class: org.apache.flink.metrics.prometheus.PrometheusReporter
     kubernetes.operator.metrics.reporter.prom.port: 9999
 ```
-Some metric reporters, including the Prometheus, needs a port to be exposed on the container. This can be achieved be defining a value for the otherwise empty `metrics.port` variable.
+Some metric reporters, including the Prometheus, need a port to be exposed on the container. This can be achieved be defining a value for the otherwise empty `metrics.port` variable.
 Either in the `values.yaml` file:
 ```yaml
 metrics:
@@ -180,3 +180,29 @@ See the [Java Operator SDK docs](https://javaoperatorsdk.io/docs/features#contex
 {{< /hint >}}
 
 To learn more about accessing the job logs or changing the log level dynamically check the corresponding [section](https://nightlies.apache.org/flink/flink-docs-master/docs/deployment/resource-providers/native_kubernetes/#logging) of the core documentation.
+
+### FlinkDeployment Logging Configuration
+
+Users have the freedom to override the default `log4j-console.properties` settings on a per-deployment level by simply putting the entire log configuration into `spec.logConfiguration`:
+
+```yaml
+spec:
+  ...
+  logConfiguration:
+    "log4j-console.properties": |
+      rootLogger.level = DEBUG
+      rootLogger.appenderRef.file.ref = LogFile
+      ...
+```
+
+### FlinkDeployment Prometheus Configuration
+
+The following example shows how to enable the Prometheus metric reporter for the FlinkDeployment:
+
+```yaml
+spec:
+  ...
+  flinkConfiguration:
+    metrics.reporter.prom.class: org.apache.flink.metrics.prometheus.PrometheusReporter
+    metrics.reporter.prom.port: 9249-9250
+```

@@ -27,6 +27,7 @@ import org.apache.flink.kubernetes.operator.crd.status.JobManagerDeploymentStatu
 import org.apache.flink.kubernetes.operator.crd.status.ReconciliationState;
 import org.apache.flink.kubernetes.operator.crd.status.ReconciliationStatus;
 import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
+import org.apache.flink.kubernetes.operator.reconciler.diff.DiffType;
 import org.apache.flink.kubernetes.operator.service.FlinkService;
 import org.apache.flink.kubernetes.operator.utils.EventRecorder;
 import org.apache.flink.kubernetes.operator.utils.IngressUtils;
@@ -60,39 +61,40 @@ public class SessionReconciler
             FlinkService flinkService,
             FlinkConfigManager configManager,
             EventRecorder eventRecorder,
-            StatusRecorder<FlinkDeploymentStatus> statusRecorder) {
+            StatusRecorder<FlinkDeployment, FlinkDeploymentStatus> statusRecorder) {
         super(kubernetesClient, configManager, eventRecorder, statusRecorder);
         this.flinkService = flinkService;
     }
 
     @Override
-    protected FlinkService getFlinkService(FlinkDeployment resource, Context context) {
+    protected FlinkService getFlinkService(FlinkDeployment resource, Context<?> context) {
         return flinkService;
     }
 
     @Override
     protected Configuration getDeployConfig(
-            ObjectMeta meta, FlinkDeploymentSpec spec, Context ctx) {
+            ObjectMeta meta, FlinkDeploymentSpec spec, Context<?> ctx) {
         return configManager.getDeployConfig(meta, spec);
     }
 
     @Override
-    protected Configuration getObserveConfig(FlinkDeployment resource, Context context) {
+    protected Configuration getObserveConfig(FlinkDeployment resource, Context<?> context) {
         return configManager.getObserveConfig(resource);
     }
 
     @Override
     protected boolean readyToReconcile(
-            FlinkDeployment deployment, Context ctx, Configuration deployConfig) {
+            FlinkDeployment deployment, Context<?> ctx, Configuration deployConfig) {
         return true;
     }
 
     @Override
     protected void reconcileSpecChange(
             FlinkDeployment deployment,
-            Context ctx,
+            Context<?> ctx,
             Configuration observeConfig,
-            Configuration deployConfig)
+            Configuration deployConfig,
+            DiffType type)
             throws Exception {
         deleteSessionCluster(deployment, observeConfig);
 
@@ -122,7 +124,7 @@ public class SessionReconciler
             FlinkDeployment cr,
             FlinkDeploymentSpec spec,
             FlinkDeploymentStatus status,
-            Context ctx,
+            Context<?> ctx,
             Configuration deployConfig,
             Optional<String> savepoint,
             boolean requireHaMetadata)
@@ -133,7 +135,7 @@ public class SessionReconciler
     }
 
     @Override
-    protected void rollback(FlinkDeployment deployment, Context ctx, Configuration observeConfig)
+    protected void rollback(FlinkDeployment deployment, Context<?> ctx, Configuration observeConfig)
             throws Exception {
         FlinkDeploymentStatus status = deployment.getStatus();
         ReconciliationStatus<FlinkDeploymentSpec> reconciliationStatus =
@@ -157,7 +159,8 @@ public class SessionReconciler
 
     @Override
     public boolean reconcileOtherChanges(
-            FlinkDeployment flinkApp, Context ctx, Configuration observeConfig) throws Exception {
+            FlinkDeployment flinkApp, Context<?> ctx, Configuration observeConfig)
+            throws Exception {
         if (shouldRecoverDeployment(observeConfig, flinkApp)) {
             recoverSession(flinkApp, observeConfig);
             return true;
@@ -172,7 +175,7 @@ public class SessionReconciler
     }
 
     @Override
-    public DeleteControl cleanupInternal(FlinkDeployment deployment, Context context) {
+    public DeleteControl cleanupInternal(FlinkDeployment deployment, Context<?> context) {
         Set<FlinkSessionJob> sessionJobs = context.getSecondaryResources(FlinkSessionJob.class);
         if (!sessionJobs.isEmpty()) {
             var error =

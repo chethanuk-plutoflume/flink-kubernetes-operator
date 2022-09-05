@@ -39,7 +39,8 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 
 /** {@link SessionObserver} unit tests. */
 public class SessionObserverTest {
-    private final Context readyContext = TestUtils.createContextWithReadyJobManagerDeployment();
+    private final Context<FlinkDeployment> readyContext =
+            TestUtils.createContextWithReadyJobManagerDeployment();
     private final FlinkConfigManager configManager = new FlinkConfigManager(new Configuration());
     private final TestingFlinkService flinkService = new TestingFlinkService();
     private SessionObserver observer;
@@ -148,7 +149,7 @@ public class SessionObserverTest {
                 status.getJobManagerDeploymentStatus());
 
         var specWithMeta = status.getReconciliationStatus().deserializeLastReconciledSpecWithMeta();
-        assertEquals(321L, specWithMeta.f1.get("metadata").get("generation").asLong());
+        assertEquals(321L, specWithMeta.f1.getMetadata().getGeneration());
         assertEquals("1", specWithMeta.f0.getFlinkConfiguration().get("k"));
     }
 }

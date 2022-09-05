@@ -28,6 +28,7 @@ import org.apache.flink.kubernetes.operator.crd.status.CommonStatus;
 import org.apache.flink.kubernetes.operator.crd.status.JobStatus;
 import org.apache.flink.kubernetes.operator.crd.status.ReconciliationState;
 import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
+import org.apache.flink.kubernetes.operator.reconciler.diff.DiffType;
 import org.apache.flink.kubernetes.operator.utils.EventRecorder;
 import org.apache.flink.kubernetes.operator.utils.SavepointUtils;
 import org.apache.flink.kubernetes.operator.utils.StatusRecorder;
@@ -55,12 +56,12 @@ public abstract class AbstractJobReconciler<
             KubernetesClient kubernetesClient,
             FlinkConfigManager configManager,
             EventRecorder eventRecorder,
-            StatusRecorder<STATUS> statusRecorder) {
+            StatusRecorder<CR, STATUS> statusRecorder) {
         super(kubernetesClient, configManager, eventRecorder, statusRecorder);
     }
 
     @Override
-    public boolean readyToReconcile(CR resource, Context context, Configuration deployConfig) {
+    public boolean readyToReconcile(CR resource, Context<?> context, Configuration deployConfig) {
         if (shouldWaitForPendingSavepoint(
                 resource.getStatus().getJobStatus(),
                 getDeployConfig(resource.getMetadata(), resource.getSpec(), context))) {
@@ -78,12 +79,31 @@ public abstract class AbstractJobReconciler<
 
     @Override
     protected void reconcileSpecChange(
-            CR resource, Context ctx, Configuration observeConfig, Configuration deployConfig)
+            CR resource,
+            Context<?> ctx,
+            Configuration observeConfig,
+            Configuration deployConfig,
+            DiffType diffType)
             throws Exception {
+
         STATUS status = resource.getStatus();
         var reconciliationStatus = status.getReconciliationStatus();
         SPEC lastReconciledSpec = reconciliationStatus.deserializeLastReconciledSpec();
         SPEC currentDeploySpec = resource.getSpec();
+
+        if (diffType == DiffType.SCALE) {
+            boolean scaled =
+                    getFlinkService(resource, ctx)
+                            .scale(
+                                    resource.getMetadata(),
+                                    resource.getSpec().getJob(),
+                                    deployConfig);
+            if (scaled) {
+                LOG.info("Reactive scaling succeeded");
+                ReconciliationUtils.updateStatusForDeployedSpec(resource, deployConfig);
+                return;
+            }
+        }
 
         JobState currentJobState = lastReconciledSpec.getJob().getState();
         JobState desiredJobState = currentDeploySpec.getJob().getState();
@@ -173,7 +193,7 @@ public abstract class AbstractJobReconciler<
             CR resource,
             SPEC spec,
             STATUS status,
-            Context ctx,
+            Context<?> ctx,
             Configuration deployConfig,
             boolean requireHaMetadata)
             throws Exception {
@@ -189,7 +209,7 @@ public abstract class AbstractJobReconciler<
     }
 
     @Override
-    protected void rollback(CR resource, Context ctx, Configuration observeConfig)
+    protected void rollback(CR resource, Context<?> ctx, Configuration observeConfig)
             throws Exception {
         var reconciliationStatus = resource.getStatus().getReconciliationStatus();
         var rollbackSpec = reconciliationStatus.deserializeLastStableSpec();
@@ -216,8 +236,8 @@ public abstract class AbstractJobReconciler<
     }
 
     @Override
-    public boolean reconcileOtherChanges(CR resource, Context context, Configuration observeConfig)
-            throws Exception {
+    public boolean reconcileOtherChanges(
+            CR resource, Context<?> context, Configuration observeConfig) throws Exception {
         return SavepointUtils.triggerSavepointIfNeeded(
                 getFlinkService(resource, context), resource, observeConfig);
     }
@@ -231,6 +251,6 @@ public abstract class AbstractJobReconciler<
      * @throws Exception Error during cancellation.
      */
     protected abstract void cancelJob(
-            CR resource, Context ctx, UpgradeMode upgradeMode, Configuration observeConfig)
+            CR resource, Context<?> ctx, UpgradeMode upgradeMode, Configuration observeConfig)
             throws Exception;
 }

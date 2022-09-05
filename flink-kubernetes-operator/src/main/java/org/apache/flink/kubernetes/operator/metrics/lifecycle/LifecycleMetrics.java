@@ -21,6 +21,7 @@ import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
 import org.apache.flink.kubernetes.operator.crd.AbstractFlinkResource;
+import org.apache.flink.kubernetes.operator.metrics.CustomResourceMetrics;
 import org.apache.flink.kubernetes.operator.metrics.KubernetesOperatorMetricGroup;
 import org.apache.flink.kubernetes.operator.metrics.KubernetesOperatorMetricOptions;
 import org.apache.flink.kubernetes.operator.metrics.OperatorMetricUtils;
@@ -53,7 +54,8 @@ import static org.apache.flink.kubernetes.operator.metrics.lifecycle.ResourceLif
  *
  * @param <CR> Flink resource type.
  */
-public class LifecycleMetrics<CR extends AbstractFlinkResource<?, ?>> {
+public class LifecycleMetrics<CR extends AbstractFlinkResource<?, ?>>
+        implements CustomResourceMetrics<CR> {
 
     private static final String TRANSITION_RESUME = "Resume";
     private static final String TRANSITION_UPGRADE = "Upgrade";
@@ -76,14 +78,12 @@ public class LifecycleMetrics<CR extends AbstractFlinkResource<?, ?>> {
     private Map<String, Tuple2<Histogram, Map<String, Histogram>>> transitionMetrics;
     private Map<ResourceLifecycleState, Tuple2<Histogram, Map<String, Histogram>>> stateTimeMetrics;
 
-    private Function<MetricGroup, MetricGroup> metricGroupFunction;
+    private Function<MetricGroup, MetricGroup> metricGroupFunction = mg -> mg.addGroup("Lifecycle");
 
     public LifecycleMetrics(
-            FlinkConfigManager configManager,
-            Clock clock,
-            KubernetesOperatorMetricGroup operatorMetricGroup) {
+            FlinkConfigManager configManager, KubernetesOperatorMetricGroup operatorMetricGroup) {
         this.configManager = configManager;
-        this.clock = clock;
+        this.clock = Clock.systemDefaultZone();
         this.operatorMetricGroup = operatorMetricGroup;
         this.namespaceHistosEnabled =
                 configManager
@@ -93,10 +93,12 @@ public class LifecycleMetrics<CR extends AbstractFlinkResource<?, ?>> {
                                         .OPERATOR_LIFECYCLE_NAMESPACE_HISTOGRAMS_ENABLED);
     }
 
+    @Override
     public void onUpdate(CR cr) {
         getLifecycleMetricTracker(cr).onUpdate(cr.getStatus().getLifecycleState(), clock.instant());
     }
 
+    @Override
     public void onRemove(CR cr) {
         lifecycleTrackers.remove(
                 Tuple2.of(cr.getMetadata().getNamespace(), cr.getMetadata().getName()));
@@ -104,7 +106,7 @@ public class LifecycleMetrics<CR extends AbstractFlinkResource<?, ?>> {
 
     private ResourceLifecycleMetricTracker getLifecycleMetricTracker(CR cr) {
         init(cr);
-        createNamespaceStateCountIfMissing(cr.getMetadata().getNamespace());
+        createNamespaceStateCountIfMissing(cr);
         return lifecycleTrackers.computeIfAbsent(
                 Tuple2.of(cr.getMetadata().getNamespace(), cr.getMetadata().getName()),
                 k -> {
@@ -121,7 +123,8 @@ public class LifecycleMetrics<CR extends AbstractFlinkResource<?, ?>> {
                 });
     }
 
-    private void createNamespaceStateCountIfMissing(String namespace) {
+    private void createNamespaceStateCountIfMissing(CR cr) {
+        var namespace = cr.getMetadata().getNamespace();
         if (!namespaces.add(namespace)) {
             return;
         }
@@ -129,7 +132,7 @@ public class LifecycleMetrics<CR extends AbstractFlinkResource<?, ?>> {
         MetricGroup lifecycleGroup =
                 metricGroupFunction.apply(
                         operatorMetricGroup.createResourceNamespaceGroup(
-                                configManager.getDefaultConfig(), namespace));
+                                configManager.getDefaultConfig(), cr.getClass(), namespace));
         for (ResourceLifecycleState state : ResourceLifecycleState.values()) {
             lifecycleGroup
                     .addGroup("State")
@@ -148,8 +151,6 @@ public class LifecycleMetrics<CR extends AbstractFlinkResource<?, ?>> {
         if (transitionMetrics != null) {
             return;
         }
-        this.metricGroupFunction =
-                mg -> mg.addGroup(cr.getClass().getSimpleName()).addGroup("Lifecycle");
 
         this.transitionMetrics = new ConcurrentHashMap<>();
         TRACKED_TRANSITIONS.forEach(
@@ -175,48 +176,50 @@ public class LifecycleMetrics<CR extends AbstractFlinkResource<?, ?>> {
     private Map<String, List<Histogram>> getTransitionHistograms(CR cr) {
         var histos = new HashMap<String, List<Histogram>>();
         transitionMetrics.forEach(
-                (metricName, t) -> {
-                    histos.put(
-                            metricName,
-                            namespaceHistosEnabled
-                                    ? List.of(
-                                            t.f0,
-                                            t.f1.computeIfAbsent(
-                                                    cr.getMetadata().getNamespace(),
-                                                    ns ->
-                                                            createTransitionHistogram(
-                                                                    metricName,
-                                                                    operatorMetricGroup
-                                                                            .createResourceNamespaceGroup(
-                                                                                    configManager
-                                                                                            .getDefaultConfig(),
-                                                                                    ns))))
-                                    : List.of(t.f0));
-                });
+                (metricName, t) ->
+                        histos.put(
+                                metricName,
+                                namespaceHistosEnabled
+                                        ? List.of(
+                                                t.f0,
+                                                t.f1.computeIfAbsent(
+                                                        cr.getMetadata().getNamespace(),
+                                                        ns ->
+                                                                createTransitionHistogram(
+                                                                        metricName,
+                                                                        operatorMetricGroup
+                                                                                .createResourceNamespaceGroup(
+                                                                                        configManager
+                                                                                                .getDefaultConfig(),
+                                                                                        cr
+                                                                                                .getClass(),
+                                                                                        ns))))
+                                        : List.of(t.f0)));
         return histos;
     }
 
     private Map<ResourceLifecycleState, List<Histogram>> getStateTimeHistograms(CR cr) {
         var histos = new HashMap<ResourceLifecycleState, List<Histogram>>();
         stateTimeMetrics.forEach(
-                (state, t) -> {
-                    histos.put(
-                            state,
-                            namespaceHistosEnabled
-                                    ? List.of(
-                                            t.f0,
-                                            t.f1.computeIfAbsent(
-                                                    cr.getMetadata().getNamespace(),
-                                                    ns ->
-                                                            createStateTimeHistogram(
-                                                                    state,
-                                                                    operatorMetricGroup
-                                                                            .createResourceNamespaceGroup(
-                                                                                    configManager
-                                                                                            .getDefaultConfig(),
-                                                                                    ns))))
-                                    : List.of(t.f0));
-                });
+                (state, t) ->
+                        histos.put(
+                                state,
+                                namespaceHistosEnabled
+                                        ? List.of(
+                                                t.f0,
+                                                t.f1.computeIfAbsent(
+                                                        cr.getMetadata().getNamespace(),
+                                                        ns ->
+                                                                createStateTimeHistogram(
+                                                                        state,
+                                                                        operatorMetricGroup
+                                                                                .createResourceNamespaceGroup(
+                                                                                        configManager
+                                                                                                .getDefaultConfig(),
+                                                                                        cr
+                                                                                                .getClass(),
+                                                                                        ns))))
+                                        : List.of(t.f0)));
         return histos;
     }
 

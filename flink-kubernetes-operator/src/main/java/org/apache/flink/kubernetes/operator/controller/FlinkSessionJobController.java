@@ -25,6 +25,7 @@ import org.apache.flink.kubernetes.operator.exception.ReconciliationException;
 import org.apache.flink.kubernetes.operator.observer.Observer;
 import org.apache.flink.kubernetes.operator.reconciler.Reconciler;
 import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
+import org.apache.flink.kubernetes.operator.utils.EventRecorder;
 import org.apache.flink.kubernetes.operator.utils.EventSourceUtils;
 import org.apache.flink.kubernetes.operator.utils.StatusRecorder;
 import org.apache.flink.kubernetes.operator.validation.FlinkResourceValidator;
@@ -60,19 +61,22 @@ public class FlinkSessionJobController
     private final Set<FlinkResourceValidator> validators;
     private final Reconciler<FlinkSessionJob> reconciler;
     private final Observer<FlinkSessionJob> observer;
-    private final StatusRecorder<FlinkSessionJobStatus> statusRecorder;
+    private final StatusRecorder<FlinkSessionJob, FlinkSessionJobStatus> statusRecorder;
+    private final EventRecorder eventRecorder;
 
     public FlinkSessionJobController(
             FlinkConfigManager configManager,
             Set<FlinkResourceValidator> validators,
             Reconciler<FlinkSessionJob> reconciler,
             Observer<FlinkSessionJob> observer,
-            StatusRecorder<FlinkSessionJobStatus> statusRecorder) {
+            StatusRecorder<FlinkSessionJob, FlinkSessionJobStatus> statusRecorder,
+            EventRecorder eventRecorder) {
         this.configManager = configManager;
         this.validators = validators;
         this.reconciler = reconciler;
         this.observer = observer;
         this.statusRecorder = statusRecorder;
+        this.eventRecorder = eventRecorder;
     }
 
     @Override
@@ -122,12 +126,18 @@ public class FlinkSessionJobController
                 EventSourceUtils.getFlinkDeploymentInformerEventSource(context));
     }
 
-    private boolean validateSessionJob(FlinkSessionJob sessionJob, Context context) {
+    private boolean validateSessionJob(FlinkSessionJob sessionJob, Context<?> context) {
         for (FlinkResourceValidator validator : validators) {
             Optional<String> validationError =
                     validator.validateSessionJob(
                             sessionJob, context.getSecondaryResource(FlinkDeployment.class));
             if (validationError.isPresent()) {
+                eventRecorder.triggerEvent(
+                        sessionJob,
+                        EventRecorder.Type.Warning,
+                        EventRecorder.Reason.ValidationError,
+                        EventRecorder.Component.Operator,
+                        validationError.get());
                 return ReconciliationUtils.applyValidationErrorAndResetSpec(
                         sessionJob, validationError.get());
             }

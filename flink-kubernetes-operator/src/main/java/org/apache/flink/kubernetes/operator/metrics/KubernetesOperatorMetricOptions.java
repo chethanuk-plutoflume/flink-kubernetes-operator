@@ -43,6 +43,13 @@ public class KubernetesOperatorMetricOptions {
                     .withDescription(
                             "Enable KubernetesClient metrics for measuring the HTTP traffic to the Kubernetes API Server.");
 
+    public static final ConfigOption<Boolean> OPERATOR_RESOURCE_METRICS_ENABLED =
+            ConfigOptions.key("kubernetes.operator.resource.metrics.enabled")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription(
+                            "Enables metrics for FlinkDeployment and FlinkSessionJob custom resources.");
+
     public static final ConfigOption<Boolean> OPERATOR_LIFECYCLE_METRICS_ENABLED =
             ConfigOptions.key("kubernetes.operator.resource.lifecycle.metrics.enabled")
                     .booleanType()
@@ -75,7 +82,8 @@ public class KubernetesOperatorMetricOptions {
     public static final ConfigOption<String> SCOPE_NAMING_KUBERNETES_OPERATOR_RESOURCENS =
             ConfigOptions.key("metrics.scope.k8soperator.resourcens")
                     .stringType()
-                    .defaultValue("<host>.k8soperator.<namespace>.<name>.namespace.<resourcens>")
+                    .defaultValue(
+                            "<host>.k8soperator.<namespace>.<name>.namespace.<resourcens>.<resourcetype>")
                     .withDescription(
                             "Defines the scope format string that is applied to all metrics scoped to the kubernetes operator resource namespace.");
 
@@ -83,7 +91,7 @@ public class KubernetesOperatorMetricOptions {
             ConfigOptions.key("metrics.scope.k8soperator.resource")
                     .stringType()
                     .defaultValue(
-                            "<host>.k8soperator.<namespace>.<name>.resource.<resourcens>.<resourcename>")
+                            "<host>.k8soperator.<namespace>.<name>.resource.<resourcens>.<resourcename>.<resourcetype>")
                     .withDescription(
                             "Defines the scope format string that is applied to all metrics scoped to the kubernetes operator resource.");
 }

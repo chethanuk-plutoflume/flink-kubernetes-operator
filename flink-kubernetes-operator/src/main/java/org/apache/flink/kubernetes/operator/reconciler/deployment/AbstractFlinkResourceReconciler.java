@@ -31,6 +31,7 @@ import org.apache.flink.kubernetes.operator.crd.status.JobManagerDeploymentStatu
 import org.apache.flink.kubernetes.operator.crd.status.ReconciliationState;
 import org.apache.flink.kubernetes.operator.reconciler.Reconciler;
 import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
+import org.apache.flink.kubernetes.operator.reconciler.diff.DiffType;
 import org.apache.flink.kubernetes.operator.service.FlinkService;
 import org.apache.flink.kubernetes.operator.utils.EventRecorder;
 import org.apache.flink.kubernetes.operator.utils.FlinkUtils;
@@ -63,11 +64,12 @@ public abstract class AbstractFlinkResourceReconciler<
 
     protected final FlinkConfigManager configManager;
     protected final EventRecorder eventRecorder;
-    protected final StatusRecorder<STATUS> statusRecorder;
+    protected final StatusRecorder<CR, STATUS> statusRecorder;
     protected final KubernetesClient kubernetesClient;
 
     public static final String MSG_SUSPENDED = "Suspending existing deployment.";
-    public static final String MSG_SPEC_CHANGED = "Detected spec change, starting reconciliation.";
+    public static final String MSG_SPEC_CHANGED =
+            "%s change(s) detected (%s), starting reconciliation.";
     public static final String MSG_ROLLBACK = "Rolling back failed deployment.";
     public static final String MSG_SUBMIT = "Starting deployment";
 
@@ -75,7 +77,7 @@ public abstract class AbstractFlinkResourceReconciler<
             KubernetesClient kubernetesClient,
             FlinkConfigManager configManager,
             EventRecorder eventRecorder,
-            StatusRecorder<STATUS> statusRecorder) {
+            StatusRecorder<CR, STATUS> statusRecorder) {
         this.kubernetesClient = kubernetesClient;
         this.configManager = configManager;
         this.eventRecorder = eventRecorder;
@@ -83,7 +85,7 @@ public abstract class AbstractFlinkResourceReconciler<
     }
 
     @Override
-    public final void reconcile(CR cr, Context ctx) throws Exception {
+    public final void reconcile(CR cr, Context<?> ctx) throws Exception {
         var spec = cr.getSpec();
         var deployConfig = getDeployConfig(cr.getMetadata(), spec, ctx);
         var status = cr.getStatus();
@@ -122,25 +124,33 @@ public abstract class AbstractFlinkResourceReconciler<
                 cr.getStatus().getReconciliationStatus().deserializeLastReconciledSpec();
         SPEC currentDeploySpec = cr.getSpec();
 
-        boolean specChanged =
-                reconciliationStatus.getState() == ReconciliationState.UPGRADING
-                        || !currentDeploySpec.equals(lastReconciledSpec);
-        var observeConfig = getObserveConfig(cr, ctx);
+        var specDiff = currentDeploySpec.diff(lastReconciledSpec);
+
         var flinkService = getFlinkService(cr, ctx);
+
+        boolean specChanged =
+                DiffType.IGNORE != specDiff.getType()
+                        || reconciliationStatus.getState() == ReconciliationState.UPGRADING;
+
+        var observeConfig = getObserveConfig(cr, ctx);
+
         if (specChanged) {
+
             if (checkNewSpecAlreadyDeployed(cr, deployConfig)) {
                 return;
             }
-            LOG.info(MSG_SPEC_CHANGED);
+
+            var specChangeMessage = String.format(MSG_SPEC_CHANGED, specDiff.getType(), specDiff);
+            LOG.info(specChangeMessage);
             if (reconciliationStatus.getState() != ReconciliationState.UPGRADING) {
                 eventRecorder.triggerEvent(
                         cr,
                         EventRecorder.Type.Normal,
                         EventRecorder.Reason.SpecChanged,
                         EventRecorder.Component.JobManagerDeployment,
-                        MSG_SPEC_CHANGED);
+                        specChangeMessage);
             }
-            reconcileSpecChange(cr, ctx, observeConfig, deployConfig);
+            reconcileSpecChange(cr, ctx, observeConfig, deployConfig, specDiff.getType());
         } else if (shouldRollBack(cr, observeConfig, flinkService)) {
             // Rollbacks are executed in two steps, we initiate it first then return
             if (initiateRollBack(status)) {
@@ -167,7 +177,7 @@ public abstract class AbstractFlinkResourceReconciler<
      * @param ctx Reconciliation context.
      * @return Deployment configuration.
      */
-    protected abstract Configuration getDeployConfig(ObjectMeta meta, SPEC spec, Context ctx);
+    protected abstract Configuration getDeployConfig(ObjectMeta meta, SPEC spec, Context<?> ctx);
 
     /**
      * Get Flink configuration for client interactions with the running Flink deployment/session
@@ -177,7 +187,7 @@ public abstract class AbstractFlinkResourceReconciler<
      * @param context Reconciliation context.
      * @return Observe configuration.
      */
-    protected abstract Configuration getObserveConfig(CR resource, Context context);
+    protected abstract Configuration getObserveConfig(CR resource, Context<?> context);
 
     /**
      * Check whether the given Flink resource is ready to be reconciled or we are still waiting for
@@ -188,7 +198,7 @@ public abstract class AbstractFlinkResourceReconciler<
      * @param deployConfig Deployment configuration.
      * @return True if the resource is ready to be reconciled.
      */
-    protected abstract boolean readyToReconcile(CR cr, Context ctx, Configuration deployConfig);
+    protected abstract boolean readyToReconcile(CR cr, Context<?> ctx, Configuration deployConfig);
 
     /**
      * Reconcile spec upgrade on the currently deployed/suspended Flink resource and update the
@@ -200,7 +210,11 @@ public abstract class AbstractFlinkResourceReconciler<
      * @throws Exception Error during spec upgrade.
      */
     protected abstract void reconcileSpecChange(
-            CR cr, Context ctx, Configuration observeConfig, Configuration deployConfig)
+            CR cr,
+            Context<?> ctx,
+            Configuration observeConfig,
+            Configuration deployConfig,
+            DiffType diffType)
             throws Exception;
 
     /**
@@ -211,7 +225,7 @@ public abstract class AbstractFlinkResourceReconciler<
      * @param observeConfig Observe configuration.
      * @throws Exception Error during rollback.
      */
-    protected abstract void rollback(CR cr, Context ctx, Configuration observeConfig)
+    protected abstract void rollback(CR cr, Context<?> ctx, Configuration observeConfig)
             throws Exception;
 
     /**
@@ -224,10 +238,10 @@ public abstract class AbstractFlinkResourceReconciler<
      * @throws Exception Error during reconciliation.
      */
     protected abstract boolean reconcileOtherChanges(
-            CR cr, Context context, Configuration observeConfig) throws Exception;
+            CR cr, Context<?> context, Configuration observeConfig) throws Exception;
 
     @Override
-    public final DeleteControl cleanup(CR resource, Context context) {
+    public final DeleteControl cleanup(CR resource, Context<?> context) {
         return cleanupInternal(resource, context);
     }
 
@@ -247,7 +261,7 @@ public abstract class AbstractFlinkResourceReconciler<
             CR relatedResource,
             SPEC spec,
             STATUS status,
-            Context ctx,
+            Context<?> ctx,
             Configuration deployConfig,
             Optional<String> savepoint,
             boolean requireHaMetadata)
@@ -260,16 +274,16 @@ public abstract class AbstractFlinkResourceReconciler<
      * @param context Current context.
      * @return DeleteControl object.
      */
-    protected abstract DeleteControl cleanupInternal(CR resource, Context context);
+    protected abstract DeleteControl cleanupInternal(CR resource, Context<?> context);
 
     /**
      * Get the Flink service related to the resource and context.
      *
-     * @param resource
-     * @param context
-     * @return
+     * @param resource Resource being reconciled.
+     * @param context Current context.
+     * @return Flink service implementation.
      */
-    protected abstract FlinkService getFlinkService(CR resource, Context context);
+    protected abstract FlinkService getFlinkService(CR resource, Context<?> context);
 
     /**
      * Checks whether the desired spec already matches the currently deployed spec. If they match
